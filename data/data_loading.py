@@ -6,14 +6,17 @@ import numpy as np
 
 from data import data_processing
 
+
 class WikiKG90MProcessedDataset(Dataset):
     """WikiKG90M processed dataset."""
 
-    def __init__(self, root_data_dir: str, include_inverse: bool=True, from_dataset=None):
+    def __init__(self, root_data_dir: str = None, include_inverse: bool = True, from_dataset: WikiKG90MDataset = None):
         """
         Args:
             root_data_dir (str): Root data dir containing the processed WikiKG90M dataset.
         """
+        assert root_data_dir is not None or from_dataset is not None, \
+            "Must initiate WikiKG90MProcessedDataset with data dir or from_dataset."
         if from_dataset:
             dataset = from_dataset
         else:
@@ -30,10 +33,10 @@ class WikiKG90MProcessedDataset(Dataset):
             self.train_r_both = dataset.train_r_both # corresponding relation
         else:
             self.includes_inverse = False
-        self.entity_feat = dataset.entity_feat # feature matrix for entities
-        self.relation_feat = dataset.relation_feat # feature matrix for relation types
-        self.edge_dict = dataset.edge_dict # dict from head id to list of tail ids #includes both pairs at the moment
-        self.relation_dict = dataset.relation_dict # corresponding to edge_dict, dict from head id to list of relation ids #includes both directions at the moment
+        self.entity_feat = dataset.entity_feat  # feature matrix for entities
+        self.relation_feat = dataset.relation_feat  # feature matrix for relation types
+        self.edge_dict = dataset.edge_dict  # dict from head id to list of tail ids #includes both pairs at the moment
+        self.relation_dict = dataset.relation_dict  # corresponding to edge_dict, dict from head id to list of relation ids #includes both directions at the moment
         self.degrees = dataset.degrees
 
     @staticmethod
@@ -41,7 +44,7 @@ class WikiKG90MProcessedDataset(Dataset):
         """Load directly from results of data_processing.load_processed_data
         Primarily used for development purposes.
         """
-        return WikiKG90MProcessedDataset(None, from_dataset=processed_dataset)
+        return WikiKG90MProcessedDataset("", from_dataset=processed_dataset)
 
     def __len__(self):
         return len(self.train_ht)
@@ -55,7 +58,7 @@ class WikiKG90MProcessedDataset(Dataset):
 
         return batch_ht, batch_r
 
-    def get_collate_fn(self, single_query_per_head=True, max_neighbors=100):
+    def get_collate_fn(self, single_query_per_head=True, max_neighbors=10):
         def wikikg_collate_fn(batch):
             # query edge marked as query
             # 1-hop connected entities included
@@ -66,6 +69,21 @@ class WikiKG90MProcessedDataset(Dataset):
             edge_relations = []
             is_query = []
             labels = []
+
+            def add_neighbors(node, ignore_r, ignore_t):
+                if self.degrees[node] > max_neighbors:
+                    selection = np.random.choice(np.arange(self.degrees[node]), size=(max_neighbors,), replace=False)
+                else:
+                    selection = np.arange(self.degrees[node])
+                for tail, rel in zip(self.edge_dict[node][selection], self.relation_dict[node][selection]):
+                    if tail == ignore_t and rel == ignore_r:  # do not include query relation here
+                        continue
+                    entity_set.add(tail)
+                    edge_heads.append(_h)
+                    edge_tails.append(tail)
+                    edge_relations.append(rel)
+                    is_query.append(0)
+
             for _ht, _r in batch:
                 # get neighbors of h and t
                 _h, _t = _ht[0], _ht[1]
@@ -76,30 +94,8 @@ class WikiKG90MProcessedDataset(Dataset):
                         _t = random.randrange(self.num_entities)
                         _label = 0
 
-                if self.degrees[_h] > max_neighbors:
-                    selection = np.random.randint(self.degrees[_h], size=(max_neighbors,))
-                else: 
-                    selection = np.arange(self.degrees[_h])
-                for tail, rel in zip(self.edge_dict[_h][selection], self.relation_dict[_h][selection]):
-                    if tail == _t and rel == _r: # do not include query relation here
-                        continue
-                    entity_set.add(tail)
-                    edge_heads.append(_h)
-                    edge_tails.append(tail)
-                    edge_relations.append(rel)
-                    is_query.append(0)
-                if self.degrees[_t] > max_neighbors:
-                    selection = np.random.randint(self.degrees[_t], size=(max_neighbors,))
-                else:
-                    selection = np.arange(self.degrees[_t])
-                for tail, rel in zip(self.edge_dict[_t][selection], self.relation_dict[_t][selection]):
-                    if self.includes_inverse and tail == _h and rel == _r + self.num_entities/2: # do not include inverse of query relation here
-                        continue
-                    entity_set.add(tail)
-                    edge_heads.append(_t)
-                    edge_tails.append(tail)
-                    edge_relations.append(rel)
-                    is_query.append(0)
+                add_neighbors(_h, _r, _t)
+                add_neighbors(_t, _r + self.num_relations, _h)
 
                 # add positive query
                 entity_set.add(_h)
@@ -113,16 +109,8 @@ class WikiKG90MProcessedDataset(Dataset):
                 # add negative sample
                 if not single_query_per_head:
                     neg_t = random.randrange(self.num_entities)
-                    if self.degrees[neg_t] > max_neighbors:
-                        selection = np.random.randint(self.degrees[_t], size=(max_neighbors,))
-                    else:
-                        selection = np.arange(self.degrees[_t])
-                    for tail, rel in zip(self.edge_dict[neg_t], self.relation_dict[neg_t]):
-                        entity_set.add(tail)
-                        edge_heads.append(neg_t)
-                        edge_tails.append(tail)
-                        edge_relations.append(rel)
-                        is_query.append(0)
+                    add_neighbors(neg_t, _r + self.num_relations, _h)
+                    # add negative query
                     entity_set.add(neg_t)
                     edge_heads.append(_h)
                     edge_tails.append(neg_t)
@@ -130,14 +118,18 @@ class WikiKG90MProcessedDataset(Dataset):
                     is_query.append(1)
                     labels.append(0)
 
-            ht_tensor = torch.LongTensor([edge_heads, edge_tails])
-            r_tensor = torch.LongTensor(edge_relations)
-            entity_set = torch.LongTensor(list(entity_set))
-            queries = torch.LongTensor(is_query)
-            labels = torch.LongTensor(labels)
-            return ht_tensor, r_tensor, entity_set, queries, labels
+            ht_tensor = torch.tensor([edge_heads, edge_tails])
+            r_tensor = torch.tensor(edge_relations)
+            entity_set = torch.tensor(list(entity_set))
+            entity_feat = torch.tensor(self.entity_feat[entity_set])
+            queries = torch.tensor(is_query)
+            labels = torch.tensor(labels)
+            node_id_to_batch = -torch.ones((self.num_entities,), dtype=torch.int64)
+            node_id_to_batch[entity_set] = torch.arange(entity_set.shape[0])
+            return ht_tensor, r_tensor, entity_set, entity_feat, node_id_to_batch, queries, labels
         return wikikg_collate_fn
 
 
-def load_dataset(root_data_dir):
+def load_dataset(root_data_dir: str):
     return WikiKG90MProcessedDataset(root_data_dir)
+

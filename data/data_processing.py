@@ -12,12 +12,12 @@ from ogb.lsc import WikiKG90MDataset
 DATA_DIR = "/nas/home/elanmark/data"
 
 
-def load_original_data(root_data_dir: str):
+def load_original_data(root_data_dir: str) -> WikiKG90MDataset:
     dataset = WikiKG90MDataset(root=root_data_dir)
     return dataset
 
 
-def process_data(root_data_dir: str):
+def process_data(root_data_dir: str) -> None:
     print('Loading original data.')
     dataset = load_original_data(root_data_dir)
     save_dir = os.path.join(root_data_dir, "wikikg90m_kddcup2021", "processed")
@@ -72,8 +72,7 @@ def process_data(root_data_dir: str):
     np.save(os.path.join(save_dir, 'degrees.npy'), degrees)
 
 
-
-def load_processed_data(root_data_dir: str):
+def load_processed_data(root_data_dir: str) -> WikiKG90MDataset:
     save_dir = os.path.join(root_data_dir, "wikikg90m_kddcup2021", "processed")
     print('Loading processed dataset.')
     dataset = load_original_data(root_data_dir)
