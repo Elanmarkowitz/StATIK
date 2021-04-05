@@ -1,10 +1,12 @@
+import array
 from ogb.lsc import WikiKG90MDataset
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 import random
 import numpy as np 
 
 from data import data_processing
+from data.left_contiguous_csr import LeftContiguousCSR
 
 
 class WikiKG90MProcessedDataset(Dataset):
@@ -35,9 +37,12 @@ class WikiKG90MProcessedDataset(Dataset):
             self.includes_inverse = False
         self.entity_feat = dataset.entity_feat  # feature matrix for entities
         self.relation_feat = dataset.relation_feat  # feature matrix for relation types
-        self.edge_dict = dataset.edge_dict  # dict from head id to list of tail ids #includes both pairs at the moment
-        self.relation_dict = dataset.relation_dict  # corresponding to edge_dict, dict from head id to list of relation ids #includes both directions at the moment
+        self.edge_lccsr: LeftContiguousCSR = dataset.edge_lccsr
+        self.relation_lccsr: LeftContiguousCSR = dataset.relation_lccsr
         self.degrees = dataset.degrees
+        self.feature_dim = self.entity_feat.shape[1]
+        self.valid_dict = dataset.valid_dict
+        self.test_dict = dataset.test_dict
 
     @staticmethod
     def init_post_processing(processed_dataset):
@@ -58,31 +63,69 @@ class WikiKG90MProcessedDataset(Dataset):
 
         return batch_ht, batch_r
 
-    def get_collate_fn(self, single_query_per_head=True, max_neighbors=10):
+    #@profile
+    def add_neighbors_for_batch(self, entity_set: set, edge_heads: array, edge_tails: array, edge_relations: array,
+                                is_query: array, node, ignore_r, ignore_t, max_neighbors: int):
+        # TODO: inverse relation should load as original relation in reverse order. Let Model handle inverse
+        if self.degrees[node] > max_neighbors:
+            selection = np.random.randint(self.degrees[node], size=(max_neighbors,))
+            tails = self.edge_lccsr[node][selection]
+            rels = self.relation_lccsr[node][selection]
+        else:
+            tails = self.edge_lccsr[node]
+            rels = self.relation_lccsr[node]
+        non_ignored_idx = np.logical_or(tails != ignore_t, rels != ignore_r) # do not include query relation here
+        rels = rels[non_ignored_idx]
+        tails = tails[non_ignored_idx]
+        inverse_relation_idx = rels >= self.num_relations
+        forward_relation_idx = np.logical_not(inverse_relation_idx)
+
+        for t in tails:
+            entity_set.add(t)
+
+        count_forward = forward_relation_idx.sum()
+        edge_heads.extend(np.repeat(node, count_forward))
+        edge_tails.extend(tails[forward_relation_idx])
+        edge_relations.extend(rels[forward_relation_idx])
+
+        count_backward = inverse_relation_idx.sum()
+        edge_heads.extend(tails[inverse_relation_idx])
+        edge_tails.extend(np.repeat(node, count_backward))
+        edge_relations.extend(rels[inverse_relation_idx] - self.num_relations)
+
+        is_query.extend(np.repeat(0, count_forward + count_backward))
+
+        # zipped_itr = zip(tails, rels)
+        # for tail, rel in zipped_itr:
+        #     entity_set.add(tail)
+        #     if rel > self.num_relations:  # inverse relation
+        #         edge_heads.append(tail)
+        #         edge_tails.append(node)
+        #         edge_relations.append(rel - self.num_relations)
+        #     else:
+        #         edge_heads.append(node)
+        #         edge_tails.append(tail)
+        #         edge_relations.append(rel)
+        #     is_query.append(0)
+        return
+
+    def get_collate_fn(self, single_query_per_head: bool = True, max_neighbors: int = 10, read_memmap: bool = True,
+                       eval_mode=False):
+        #@profile
         def wikikg_collate_fn(batch):
             # query edge marked as query
             # 1-hop connected entities included
 
             entity_set = set()
-            edge_heads = []
-            edge_tails = []
-            edge_relations = []
-            is_query = []
-            labels = []
+            edge_heads = array.array("i")
+            edge_tails = array.array("i")
+            edge_relations = array.array("i")
+            is_query = array.array("i")
+            labels = array.array("i")
 
             def add_neighbors(node, ignore_r, ignore_t):
-                if self.degrees[node] > max_neighbors:
-                    selection = np.random.choice(np.arange(self.degrees[node]), size=(max_neighbors,), replace=False)
-                else:
-                    selection = np.arange(self.degrees[node])
-                for tail, rel in zip(self.edge_dict[node][selection], self.relation_dict[node][selection]):
-                    if tail == ignore_t and rel == ignore_r:  # do not include query relation here
-                        continue
-                    entity_set.add(tail)
-                    edge_heads.append(_h)
-                    edge_tails.append(tail)
-                    edge_relations.append(rel)
-                    is_query.append(0)
+                return self.add_neighbors_for_batch(entity_set, edge_heads, edge_tails, edge_relations, is_query, node,
+                                                    ignore_r, ignore_t, max_neighbors)
 
             for _ht, _r in batch:
                 # get neighbors of h and t
@@ -104,7 +147,7 @@ class WikiKG90MProcessedDataset(Dataset):
                 edge_tails.append(_t)
                 edge_relations.append(_r)
                 is_query.append(1)
-                labels.append(1)
+                labels.append(_label)
 
                 # add negative sample
                 if not single_query_per_head:
@@ -118,18 +161,76 @@ class WikiKG90MProcessedDataset(Dataset):
                     is_query.append(1)
                     labels.append(0)
 
-            ht_tensor = torch.tensor([edge_heads, edge_tails])
-            r_tensor = torch.tensor(edge_relations)
-            entity_set = torch.tensor(list(entity_set))
-            entity_feat = torch.tensor(self.entity_feat[entity_set])
-            queries = torch.tensor(is_query)
-            labels = torch.tensor(labels)
-            node_id_to_batch = -torch.ones((self.num_entities,), dtype=torch.int64)
+            ht_tensor = torch.from_numpy(np.stack([edge_heads, edge_tails]).transpose()).long()
+            r_tensor = torch.from_numpy(np.array(edge_relations)).long()
+            entity_set = torch.tensor(list(entity_set)).long()
+            entity_feat = torch.from_numpy(self.entity_feat[entity_set]).float() if read_memmap else None
+            queries = torch.from_numpy(np.array(is_query)).long()
+            labels = torch.from_numpy(np.array(labels)).long()
+            node_id_to_batch = torch.empty((self.num_entities,), dtype=torch.int64)
             node_id_to_batch[entity_set] = torch.arange(entity_set.shape[0])
-            return ht_tensor, r_tensor, entity_set, entity_feat, node_id_to_batch, queries, labels
+            ht_tensor_batch = node_id_to_batch[ht_tensor]
+            return ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, node_id_to_batch, queries, labels
         return wikikg_collate_fn
 
 
 def load_dataset(root_data_dir: str):
     return WikiKG90MProcessedDataset(root_data_dir)
+
+
+class Wiki90MSubEvalDataset(Dataset):
+    def __init__(self, batch_h, batch_r, batch_t_candidate):
+        self.h = batch_h
+        self.r = batch_r
+        self.t_candidate = batch_t_candidate
+
+    def __len__(self):
+        return self.t_candidate.shape[1]
+
+    def __get__(self, idx):
+        return
+
+
+class Wiki90MEvaluationDataset(Dataset):
+
+    def __init__(self, full_dataset: WikiKG90MProcessedDataset, task):
+        self.ds = full_dataset
+        self.task = task
+        self.hr = task['hr']
+        self.t_candidate = task['t_candidate']
+
+    def __len__(self):
+        return len(self.hr)
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        batch_h = self.hr[idx][0]
+        batch_r = self.hr[idx][1]
+        batch_t_candidate = self.t_candidate[idx]
+
+        return batch_h, batch_r, batch_t_candidate
+
+    def sub_batch_loader(self, batch):
+        pass
+
+    def get_eval_collate_fn(self, single_query_per_head=True, max_neighbors=10, read_memmap=True):
+        def collate_fn(batch):
+            hrt_collate = self.ds.get_collate_fn()
+
+        return collate_fn
+
+
+class Wiki90MValidationDataset(Wiki90MEvaluationDataset):
+    def __init__(self, full_dataset: WikiKG90MProcessedDataset):
+        super(Wiki90MValidationDataset, self).__init__(full_dataset, full_dataset.valid_dict['h,r->t'])
+        self.t_correct_index = self.task['t_correct_index']
+
+
+class Wiki90MTestDataset(Wiki90MEvaluationDataset):
+    def __init__(self, full_dataset: WikiKG90MProcessedDataset):
+        super(Wiki90MTestDataset, self).__init__(full_dataset, full_dataset.valid_dict['h,r->t'])
+
+
 

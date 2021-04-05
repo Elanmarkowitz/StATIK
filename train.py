@@ -1,31 +1,120 @@
 from absl import app, flags
 import tqdm
+import contextlib
 
 import torch
+import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+import torch.nn.functional as F
+from torch.cuda.amp import autocast, GradScaler
 
 from data.data_loading import load_dataset
+from model.kg_completion_gnn import KGCompletionGNN
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("root_data_dir", "/nas/home/elanmark/data", "Root data dir for installing the ogb dataset")
 flags.DEFINE_integer("batch_size", 100, "Batch size. Number of triples.")
 flags.DEFINE_integer("samples_per_node", 10, "Number of neighbors to sample for each entity in a query triple.")
+flags.DEFINE_integer("embed_dim", 256, "Number of dimensions for hidden states.")
+flags.DEFINE_integer("layers", 2, "Number of message passing and edge update layers for model.")
+flags.DEFINE_integer("num_workers", 0, "Number of workers for the dataloader.")
+flags.DEFINE_float("lr", 1e-2, "Learning rate for optimizer.")
+flags.DEFINE_string("device", "cuda", "Device to use (cuda/cpu).")
 
+DEBUGGING_MODEL = False
 
 def main(argv):
-    try:
+    DEVICE = torch.device(FLAGS.device)
+    if not DEBUGGING_MODEL:
         dataset = load_dataset(FLAGS.root_data_dir)
-        train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size, shuffle=True,
-                                  collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node))
-        for i, batch in tqdm.tqdm(enumerate(train_loader)):
+    def train():
+        try:
+            scaler = GradScaler()
+            if not DEBUGGING_MODEL:
+                train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size, shuffle=True,
+                                          num_workers=FLAGS.num_workers,
+                                          collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, read_memmap=False))
+                with autocast() if FLAGS.device == "cuda" else contextlib.suppress():
+                    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers)
+                    model.to(DEVICE)
+                    opt = optim.Adam(model.parameters(), lr=FLAGS.lr)
+                    scheduler = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=50,
+                                                                     verbose=True, threshold_mode='rel', cooldown=10)
+                    moving_average_loss = torch.tensor(1.0)
+                    moving_average_acc = torch.tensor(0.5)
+                    moving_avg_rank = torch.tensor(10.0)
+                    for i, batch in tqdm.tqdm(enumerate(train_loader)):
+                        model.train()
+                        ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, node_id_to_batch, queries, labels = batch
+                        if entity_feat is None:
+                            entity_feat = torch.from_numpy(dataset.entity_feat[entity_set]).float()
+                        relation_feat = torch.tensor(dataset.relation_feat).float()
+                        if i == 0:
+                            import pickle
+                            pickle.dump(batch, open('sample_batch.pkl', 'wb'))
+                            pickle.dump(relation_feat, open('relation_feat.pkl', 'wb'))
+                        ht_tensor_batch = ht_tensor_batch.to(DEVICE)
+                        r_tensor = r_tensor.to(DEVICE)
+                        entity_feat = entity_feat.to(DEVICE)
+                        relation_feat = relation_feat.to(DEVICE)
+                        queries = queries.to(DEVICE)
+                        labels = labels.to(DEVICE)
+                        preds = model(ht_tensor_batch, r_tensor, entity_feat, relation_feat, queries)
+
+                        correct = torch.eq((preds > 0).long().flatten(), labels)
+                        score_1 = preds[labels==1].detach().cpu().flatten()[0]
+                        score_0 = torch.topk(preds[labels==0].detach().cpu().flatten().float()[:100], k=9).values
+                        rank = 1 + (score_1 < score_0).sum()
+                        moving_avg_rank = .9995 * moving_avg_rank + .0005 * rank.float()
+
+                        training_acc = correct.float().mean()
+                        loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
+                        moving_average_loss = .999 * moving_average_loss + 0.001 * loss.detach().cpu()
+                        moving_average_acc = .99 * moving_average_acc + 0.01 * training_acc.detach().cpu()
+                        print(f"loss={loss.detach().cpu().numpy():.5f}, avg={moving_average_loss.numpy():.5f}, "
+                              f"train_acc={training_acc.detach().cpu().numpy():.3f}, avg={moving_average_acc.numpy():.3f}, "
+                              f"rank={rank} "
+                              f"avg_rank={moving_avg_rank}")
+                        opt.zero_grad()
+                        scaler.scale(loss).backward() if FLAGS.device == "cuda" else loss.backward()
+                        opt.step()
+                        scheduler.step(moving_average_loss)
+
+
+            else:
+                import pickle
+                batch = pickle.load(open('sample_batch.pkl', 'rb'))
+                relation_feat = torch.tensor(pickle.load(open('relation_feat.pkl', 'rb'))).float()
+                ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, node_id_to_batch, queries, labels = batch
+                if entity_feat is None:
+                    entity_feat = torch.rand(entity_set.shape[0], relation_feat.shape[1])
+                with autocast():
+                    model = KGCompletionGNN(1315, 768, FLAGS.embed_dim, FLAGS.layers)  # num ent 87143637
+                    model.to(DEVICE)
+                    opt = optim.Adam(model.parameters(), lr=FLAGS.lr)
+                    model.train()
+                    ht_tensor_batch = ht_tensor_batch.to(DEVICE)
+                    r_tensor = r_tensor.to(DEVICE)
+                    entity_feat = entity_feat.to(DEVICE)
+                    relation_feat = relation_feat.to(DEVICE)
+                    queries = queries.to(DEVICE)
+                    labels = labels.to(DEVICE)
+                    preds = model(ht_tensor_batch, r_tensor, entity_feat, relation_feat, queries)
+                    breakpoint()
+                    loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
+                    opt.zero_grad()
+                    scaler.scale(loss).backward()
+                    opt.step()
+                    breakpoint()
+        except Exception as e:
+            print(e)
+            import traceback
+            traceback.print_exc()
             breakpoint()
-            ht_tensor, r_tensor, entity_set, entity_feat, node_id_to_batch, queries, labels = batch
-            relation_feat = dataset.relation_feat
-
-
-    except:
-        breakpoint()
-        return main(argv)
+            return train()
+    return train()
 
 
 if __name__ == "__main__":
