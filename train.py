@@ -29,6 +29,7 @@ DEBUGGING_MODEL = False
 def train():
     DEVICE = torch.device(FLAGS.device)
     scaler = GradScaler()
+
     if not DEBUGGING_MODEL:
         dataset = load_dataset(FLAGS.root_data_dir)
         train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size, shuffle=True,
@@ -88,25 +89,25 @@ def train():
         ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, node_id_to_batch, queries, labels = batch
         if entity_feat is None:
             entity_feat = torch.rand(entity_set.shape[0], relation_feat.shape[1])
+        model = KGCompletionGNN(1315, 768, FLAGS.embed_dim, FLAGS.layers)  # num ent 87143637
+        model.to(DEVICE)
+        opt = optim.Adam(model.parameters(), lr=FLAGS.lr)
+        model.train()
+        ht_tensor_batch = ht_tensor_batch.to(DEVICE)
+        r_tensor = r_tensor.to(DEVICE)
+        entity_feat = entity_feat.to(DEVICE)
+        relation_feat = relation_feat.to(DEVICE)
+        queries = queries.to(DEVICE)
+        labels = labels.to(DEVICE)
         with autocast():
-            model = KGCompletionGNN(1315, 768, FLAGS.embed_dim, FLAGS.layers)  # num ent 87143637
-            model.to(DEVICE)
-            opt = optim.Adam(model.parameters(), lr=FLAGS.lr)
-            model.train()
-            ht_tensor_batch = ht_tensor_batch.to(DEVICE)
-            r_tensor = r_tensor.to(DEVICE)
-            entity_feat = entity_feat.to(DEVICE)
-            relation_feat = relation_feat.to(DEVICE)
-            queries = queries.to(DEVICE)
-            labels = labels.to(DEVICE)
             preds = model(ht_tensor_batch, r_tensor, entity_feat, relation_feat, queries)
-            breakpoint()
             loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
-            opt.zero_grad()
-            scaler.scale(loss).backward()
-            scaler.step(opt)
-            scaler.update()
             breakpoint()
+        opt.zero_grad()
+        scaler.scale(loss).backward()
+        scaler.step(opt)
+        scaler.update()
+        breakpoint()
 
 
 def main(argv):
