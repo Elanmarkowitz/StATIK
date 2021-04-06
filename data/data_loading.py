@@ -109,8 +109,8 @@ class WikiKG90MProcessedDataset(Dataset):
         #     is_query.append(0)
         return
 
-    def get_collate_fn(self, single_query_per_head: bool = True, max_neighbors: int = 10, read_memmap: bool = True,
-                       eval_mode=False):
+    def get_collate_fn(self, single_query_per_head: bool = True, max_neighbors: int = 10, read_memmap: bool = False,
+                       eval_mode: bool = False):
         #@profile
         def wikikg_collate_fn(batch):
             # query edge marked as query
@@ -132,7 +132,7 @@ class WikiKG90MProcessedDataset(Dataset):
                 _h, _t = _ht[0], _ht[1]
                 _label = 1
                 
-                if single_query_per_head:
+                if single_query_per_head and not eval_mode:
                     if random.choice([True, False]):
                         _t = random.randrange(self.num_entities)
                         _label = 0
@@ -150,7 +150,7 @@ class WikiKG90MProcessedDataset(Dataset):
                 labels.append(_label)
 
                 # add negative sample
-                if not single_query_per_head:
+                if not single_query_per_head and not eval_mode:
                     neg_t = random.randrange(self.num_entities)
                     add_neighbors(neg_t, _r + self.num_relations, _h)
                     # add negative query
@@ -198,6 +198,7 @@ class Wiki90MEvaluationDataset(Dataset):
         self.task = task
         self.hr = task['hr']
         self.t_candidate = task['t_candidate']
+        self.t_correct_index = None
 
     def __len__(self):
         return len(self.hr)
@@ -209,15 +210,32 @@ class Wiki90MEvaluationDataset(Dataset):
         batch_h = self.hr[idx][0]
         batch_r = self.hr[idx][1]
         batch_t_candidate = self.t_candidate[idx]
+        t_correct_idx = self.t_correct_index[idx] if self.t_correct_index is not None else None
 
-        return batch_h, batch_r, batch_t_candidate
+        return batch_h, batch_r, batch_t_candidate, t_correct_idx
 
     def sub_batch_loader(self, batch):
         pass
 
-    def get_eval_collate_fn(self, single_query_per_head=True, max_neighbors=10, read_memmap=True):
+    def get_eval_collate_fn(self, single_query_per_head=True, max_neighbors=10, read_memmap=False):
         def collate_fn(batch):
-            hrt_collate = self.ds.get_collate_fn()
+            hrt_collate = self.ds.get_collate_fn(single_query_per_head=single_query_per_head, max_neighbors=max_neighbors,
+                                                 read_memmap=read_memmap, eval_mode=True)
+            subbatches = []
+            for i in range(self.t_candidate.shape[1]):
+                subbatch_ht = []
+                subbatch_r = []
+                for _h, _r, _t_candidates, _ in batch:
+                    subbatch_ht.append(np.array([_h, _t_candidates[i]]))
+                    subbatch_r.append(_r)
+                subbatch = hrt_collate(zip(subbatch_ht, subbatch_r))
+                subbatches.append(subbatch)
+
+            t_correct_idx = []
+            for _, _, _, _t_correct_idx in batch:
+                t_correct_idx.append(_t_correct_idx)
+
+            return subbatches, t_correct_idx
 
         return collate_fn
 
@@ -230,7 +248,7 @@ class Wiki90MValidationDataset(Wiki90MEvaluationDataset):
 
 class Wiki90MTestDataset(Wiki90MEvaluationDataset):
     def __init__(self, full_dataset: WikiKG90MProcessedDataset):
-        super(Wiki90MTestDataset, self).__init__(full_dataset, full_dataset.valid_dict['h,r->t'])
+        super(Wiki90MTestDataset, self).__init__(full_dataset, full_dataset.test_dict['h,r->t'])
 
 
 
