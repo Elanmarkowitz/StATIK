@@ -13,7 +13,7 @@ class MessageCalculationLayer(nn.Module):
         """
         :param H: shape n x embed_dim
         :param E: shape m x embed_dim
-        :param heads: shape m x 2
+        :param heads: shape m x 1
         :param r_embed: shape m x embed_dim
         :return:
             processed messages for nodes. shape nodes_in_batch x embed_dim

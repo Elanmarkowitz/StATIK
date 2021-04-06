@@ -25,96 +25,92 @@ flags.DEFINE_string("device", "cuda", "Device to use (cuda/cpu).")
 
 DEBUGGING_MODEL = False
 
-def main(argv):
+
+def train():
     DEVICE = torch.device(FLAGS.device)
+    scaler = GradScaler()
     if not DEBUGGING_MODEL:
         dataset = load_dataset(FLAGS.root_data_dir)
-    def train():
-        try:
-            scaler = GradScaler()
-            if not DEBUGGING_MODEL:
-                train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size, shuffle=True,
-                                          num_workers=FLAGS.num_workers,
-                                          collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, read_memmap=False))
-                with autocast() if FLAGS.device == "cuda" else contextlib.suppress():
-                    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers)
-                    model.to(DEVICE)
-                    opt = optim.Adam(model.parameters(), lr=FLAGS.lr)
-                    scheduler = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=50,
-                                                                     verbose=True, threshold_mode='rel', cooldown=10)
-                    moving_average_loss = torch.tensor(1.0)
-                    moving_average_acc = torch.tensor(0.5)
-                    moving_avg_rank = torch.tensor(10.0)
-                    for i, batch in tqdm.tqdm(enumerate(train_loader)):
-                        model.train()
-                        ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, node_id_to_batch, queries, labels = batch
-                        if entity_feat is None:
-                            entity_feat = torch.from_numpy(dataset.entity_feat[entity_set]).float()
-                        relation_feat = torch.tensor(dataset.relation_feat).float()
-                        if i == 0:
-                            import pickle
-                            pickle.dump(batch, open('sample_batch.pkl', 'wb'))
-                            pickle.dump(relation_feat, open('relation_feat.pkl', 'wb'))
-                        ht_tensor_batch = ht_tensor_batch.to(DEVICE)
-                        r_tensor = r_tensor.to(DEVICE)
-                        entity_feat = entity_feat.to(DEVICE)
-                        relation_feat = relation_feat.to(DEVICE)
-                        queries = queries.to(DEVICE)
-                        labels = labels.to(DEVICE)
-                        preds = model(ht_tensor_batch, r_tensor, entity_feat, relation_feat, queries)
-
-                        correct = torch.eq((preds > 0).long().flatten(), labels)
-                        score_1 = preds[labels==1].detach().cpu().flatten()[0]
-                        score_0 = torch.topk(preds[labels==0].detach().cpu().flatten().float()[:100], k=9).values
-                        rank = 1 + (score_1 < score_0).sum()
-                        moving_avg_rank = .9995 * moving_avg_rank + .0005 * rank.float()
-
-                        training_acc = correct.float().mean()
-                        loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
-                        moving_average_loss = .999 * moving_average_loss + 0.001 * loss.detach().cpu()
-                        moving_average_acc = .99 * moving_average_acc + 0.01 * training_acc.detach().cpu()
-                        print(f"loss={loss.detach().cpu().numpy():.5f}, avg={moving_average_loss.numpy():.5f}, "
-                              f"train_acc={training_acc.detach().cpu().numpy():.3f}, avg={moving_average_acc.numpy():.3f}, "
-                              f"rank={rank} "
-                              f"avg_rank={moving_avg_rank}")
-                        opt.zero_grad()
-                        scaler.scale(loss).backward() if FLAGS.device == "cuda" else loss.backward()
-                        opt.step()
-                        scheduler.step(moving_average_loss)
-
-
-            else:
+        train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size, shuffle=True,
+                                  num_workers=FLAGS.num_workers,
+                                  collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, read_memmap=False))
+        model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers)
+        model.to(DEVICE)
+        opt = optim.Adam(model.parameters(), lr=FLAGS.lr)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=50,
+                                                         verbose=True, threshold_mode='rel', cooldown=10)
+        moving_average_loss = torch.tensor(1.0)
+        moving_average_acc = torch.tensor(0.5)
+        moving_avg_rank = torch.tensor(10.0)
+        for i, batch in tqdm.tqdm(enumerate(train_loader)):
+            model.train()
+            ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, node_id_to_batch, queries, labels = batch
+            if entity_feat is None:
+                entity_feat = torch.from_numpy(dataset.entity_feat[entity_set]).float()
+            relation_feat = torch.tensor(dataset.relation_feat).float()
+            if i == 0:
                 import pickle
-                batch = pickle.load(open('sample_batch.pkl', 'rb'))
-                relation_feat = torch.tensor(pickle.load(open('relation_feat.pkl', 'rb'))).float()
-                ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, node_id_to_batch, queries, labels = batch
-                if entity_feat is None:
-                    entity_feat = torch.rand(entity_set.shape[0], relation_feat.shape[1])
-                with autocast():
-                    model = KGCompletionGNN(1315, 768, FLAGS.embed_dim, FLAGS.layers)  # num ent 87143637
-                    model.to(DEVICE)
-                    opt = optim.Adam(model.parameters(), lr=FLAGS.lr)
-                    model.train()
-                    ht_tensor_batch = ht_tensor_batch.to(DEVICE)
-                    r_tensor = r_tensor.to(DEVICE)
-                    entity_feat = entity_feat.to(DEVICE)
-                    relation_feat = relation_feat.to(DEVICE)
-                    queries = queries.to(DEVICE)
-                    labels = labels.to(DEVICE)
-                    preds = model(ht_tensor_batch, r_tensor, entity_feat, relation_feat, queries)
-                    breakpoint()
-                    loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
-                    opt.zero_grad()
-                    scaler.scale(loss).backward()
-                    opt.step()
-                    breakpoint()
-        except Exception as e:
-            print(e)
-            import traceback
-            traceback.print_exc()
+                pickle.dump(batch, open('sample_batch.pkl', 'wb'))
+                pickle.dump(relation_feat, open('relation_feat.pkl', 'wb'))
+            ht_tensor_batch = ht_tensor_batch.to(DEVICE)
+            r_tensor = r_tensor.to(DEVICE)
+            entity_feat = entity_feat.to(DEVICE)
+            relation_feat = relation_feat.to(DEVICE)
+            queries = queries.to(DEVICE)
+            labels = labels.to(DEVICE)
+            with autocast() if FLAGS.device == "cuda" else contextlib.suppress():
+                preds = model(ht_tensor_batch, r_tensor, entity_feat, relation_feat, queries)
+                loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
+
+            correct = torch.eq((preds > 0).long().flatten(), labels)
+            score_1 = preds[labels==1].detach().cpu().flatten()[0]
+            score_0 = torch.topk(preds[labels==0].detach().cpu().flatten().float()[:100], k=9).values
+            rank = 1 + (score_1 < score_0).sum()
+            moving_avg_rank = .9995 * moving_avg_rank + .0005 * rank.float()
+
+            training_acc = correct.float().mean()
+            moving_average_loss = .999 * moving_average_loss + 0.001 * loss.detach().cpu()
+            moving_average_acc = .99 * moving_average_acc + 0.01 * training_acc.detach().cpu()
+            print(f"loss={loss.detach().cpu().numpy():.5f}, avg={moving_average_loss.numpy():.5f}, "
+                  f"train_acc={training_acc.detach().cpu().numpy():.3f}, avg={moving_average_acc.numpy():.3f}, "
+                  f"rank={rank} "
+                  f"avg_rank={moving_avg_rank}")
+            opt.zero_grad()
+            scaler.scale(loss).backward() if FLAGS.device == "cuda" else loss.backward()
+            scaler.step(opt)
+            scaler.update()
+            scheduler.step(moving_average_loss)
+
+    else:  # TODO: make part of this a function call to avoid code duplication
+        import pickle
+        batch = pickle.load(open('sample_batch.pkl', 'rb'))
+        relation_feat = torch.tensor(pickle.load(open('relation_feat.pkl', 'rb'))).float()
+        ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, node_id_to_batch, queries, labels = batch
+        if entity_feat is None:
+            entity_feat = torch.rand(entity_set.shape[0], relation_feat.shape[1])
+        with autocast():
+            model = KGCompletionGNN(1315, 768, FLAGS.embed_dim, FLAGS.layers)  # num ent 87143637
+            model.to(DEVICE)
+            opt = optim.Adam(model.parameters(), lr=FLAGS.lr)
+            model.train()
+            ht_tensor_batch = ht_tensor_batch.to(DEVICE)
+            r_tensor = r_tensor.to(DEVICE)
+            entity_feat = entity_feat.to(DEVICE)
+            relation_feat = relation_feat.to(DEVICE)
+            queries = queries.to(DEVICE)
+            labels = labels.to(DEVICE)
+            preds = model(ht_tensor_batch, r_tensor, entity_feat, relation_feat, queries)
             breakpoint()
-            return train()
-    return train()
+            loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
+            opt.zero_grad()
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+            breakpoint()
+
+
+def main(argv):
+    train()
 
 
 if __name__ == "__main__":

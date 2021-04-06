@@ -19,3 +19,12 @@ class LeftContiguousCSR:
     def load(filepath):
         npzfile = np.load(filepath)
         return LeftContiguousCSR(npzfile['indptr'], npzfile['degrees'], npzfile['data'])
+
+# uniform batch sampling can be done as follows
+
+# self.data[
+#   np.floor(
+#     np.random.uniform(size=(batch.size, num_neighbors)) * degrees[batch].reshape(-1,1)
+#   ).astype(np.int32)  +  indptr[batch].reshape(-1,1)
+# ]
+

@@ -91,7 +91,6 @@ def process_data(root_data_dir: str) -> None:
     rel_lccsr.save(os.path.join(save_dir, 'rel_lccsr.npz'))
     edge_lccsr.save(os.path.join(save_dir, 'edge_lccsr.npz'))
 
-    breakpoint()
     # for i in tqdm.tqdm(range(dataset.num_entities)):
     #     edge_dict[i] = np.array(edge_dict[i], dtype=np.int32)
     #     relation_dict[i] = np.array(relation_dict[i], dtype=np.int32)
