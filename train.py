@@ -1,16 +1,17 @@
 from absl import app, flags
 import tqdm
 import contextlib
+import pickle
 
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
-
 import torch.nn.functional as F
 from torch.cuda.amp import autocast, GradScaler
+from ogb.lsc import WikiKG90MEvaluator
 
-from data.data_loading import load_dataset
+from data.data_loading import load_dataset, WikiKG90MProcessedDataset, Wiki90MValidationDataset, Wiki90MTestDataset
 from model.kg_completion_gnn import KGCompletionGNN
 
 FLAGS = flags.FLAGS
@@ -26,6 +27,29 @@ flags.DEFINE_string("device", "cuda", "Device to use (cuda/cpu).")
 DEBUGGING_MODEL = False
 
 
+def prepare_batch_for_model(batch, dataset: WikiKG90MProcessedDataset, save_batch=False):
+    ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, node_id_to_batch, queries, labels = batch
+    if entity_feat is None:
+        entity_feat = torch.from_numpy(dataset.entity_feat[entity_set]).float()
+    relation_feat = torch.tensor(dataset.relation_feat).float()
+    batch = ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, relation_feat, node_id_to_batch, queries, labels
+    if save_batch:
+        pickle.dump(batch, open('sample_batch.pkl', 'wb'))
+    return batch
+
+def move_batch_to_device(batch, device):
+    ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, relation_feat, node_id_to_batch, queries, labels = batch
+    ht_tensor_batch = ht_tensor_batch.to(device)
+    r_tensor = r_tensor.to(device)
+    entity_feat = entity_feat.to(device)
+    relation_feat = relation_feat.to(device)
+    queries = queries.to(device)
+    labels = labels.to(device)
+    batch = ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, relation_feat, node_id_to_batch, queries, labels
+    return batch
+
+
+
 def train():
     DEVICE = torch.device(FLAGS.device)
     scaler = GradScaler()
@@ -34,7 +58,7 @@ def train():
         dataset = load_dataset(FLAGS.root_data_dir)
         train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size, shuffle=True,
                                   num_workers=FLAGS.num_workers,
-                                  collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, read_memmap=False))
+                                  collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node))
         model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers)
         model.to(DEVICE)
         opt = optim.Adam(model.parameters(), lr=FLAGS.lr)
@@ -45,20 +69,9 @@ def train():
         moving_avg_rank = torch.tensor(10.0)
         for i, batch in tqdm.tqdm(enumerate(train_loader)):
             model.train()
-            ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, node_id_to_batch, queries, labels = batch
-            if entity_feat is None:
-                entity_feat = torch.from_numpy(dataset.entity_feat[entity_set]).float()
-            relation_feat = torch.tensor(dataset.relation_feat).float()
-            if i == 0:
-                import pickle
-                pickle.dump(batch, open('sample_batch.pkl', 'wb'))
-                pickle.dump(relation_feat, open('relation_feat.pkl', 'wb'))
-            ht_tensor_batch = ht_tensor_batch.to(DEVICE)
-            r_tensor = r_tensor.to(DEVICE)
-            entity_feat = entity_feat.to(DEVICE)
-            relation_feat = relation_feat.to(DEVICE)
-            queries = queries.to(DEVICE)
-            labels = labels.to(DEVICE)
+            batch = prepare_batch_for_model(batch, dataset)
+            batch = move_batch_to_device(batch, DEVICE)
+            ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, relation_feat, node_id_to_batch, queries, labels = batch
             with autocast() if FLAGS.device == "cuda" else contextlib.suppress():
                 preds = model(ht_tensor_batch, r_tensor, entity_feat, relation_feat, queries)
                 loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
@@ -85,10 +98,8 @@ def train():
     else:  # TODO: make part of this a function call to avoid code duplication
         import pickle
         batch = pickle.load(open('sample_batch.pkl', 'rb'))
-        relation_feat = torch.tensor(pickle.load(open('relation_feat.pkl', 'rb'))).float()
-        ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, node_id_to_batch, queries, labels = batch
-        if entity_feat is None:
-            entity_feat = torch.rand(entity_set.shape[0], relation_feat.shape[1])
+        batch = move_batch_to_device(batch, DEVICE)
+        ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, relation_feat, node_id_to_batch, queries, labels = batch
         model = KGCompletionGNN(1315, 768, FLAGS.embed_dim, FLAGS.layers)  # num ent 87143637
         model.to(DEVICE)
         opt = optim.Adam(model.parameters(), lr=FLAGS.lr)
