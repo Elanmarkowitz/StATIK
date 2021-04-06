@@ -10,7 +10,7 @@ from ogb.lsc import WikiKG90MDataset
 
 from data.left_contiguous_csr import LeftContiguousCSR
 
-DATA_DIR = "/nas/home/elanmark/data"
+DATA_DIR = os.environ["DATA_DIR"] if "DATA_DIR" in os.environ else "/nas/home/elanmark/data"
 
 
 def load_original_data(root_data_dir: str) -> WikiKG90MDataset:
