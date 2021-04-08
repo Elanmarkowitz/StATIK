@@ -2,6 +2,7 @@ from absl import app, flags
 import tqdm
 import contextlib
 import pickle
+import numpy as np
 
 import torch
 import torch.optim as optim
@@ -23,6 +24,7 @@ flags.DEFINE_integer("layers", 2, "Number of message passing and edge update lay
 flags.DEFINE_integer("num_workers", 0, "Number of workers for the dataloader.")
 flags.DEFINE_float("lr", 1e-2, "Learning rate for optimizer.")
 flags.DEFINE_string("device", "cuda", "Device to use (cuda/cpu).")
+flags.DEFINE_integer("validate_every", 10000, "How many iterations to do between each single batch validation.")
 
 DEBUGGING_MODEL = False
 
@@ -37,6 +39,7 @@ def prepare_batch_for_model(batch, dataset: WikiKG90MProcessedDataset, save_batc
         pickle.dump(batch, open('sample_batch.pkl', 'wb'))
     return batch
 
+
 def move_batch_to_device(batch, device):
     ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, relation_feat, node_id_to_batch, queries, labels = batch
     ht_tensor_batch = ht_tensor_batch.to(device)
@@ -47,7 +50,6 @@ def move_batch_to_device(batch, device):
     labels = labels.to(device)
     batch = ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, relation_feat, node_id_to_batch, queries, labels
     return batch
-
 
 
 def train():
@@ -67,7 +69,10 @@ def train():
         moving_average_loss = torch.tensor(1.0)
         moving_average_acc = torch.tensor(0.5)
         moving_avg_rank = torch.tensor(10.0)
-        for i, batch in tqdm.tqdm(enumerate(train_loader)):
+
+        validate(dataset, model, single_itr=True)
+
+        for i, batch in enumerate(tqdm.tqdm(train_loader)):
             model.train()
             batch = prepare_batch_for_model(batch, dataset)
             batch = move_batch_to_device(batch, DEVICE)
@@ -94,6 +99,8 @@ def train():
             scaler.step(opt)
             scaler.update()
             scheduler.step(moving_average_loss)
+            if (i + 1) % FLAGS.validate_every == 0:
+                validate(dataset, model, single_itr=True)
 
     else:  # TODO: make part of this a function call to avoid code duplication
         import pickle
@@ -104,12 +111,6 @@ def train():
         model.to(DEVICE)
         opt = optim.Adam(model.parameters(), lr=FLAGS.lr)
         model.train()
-        ht_tensor_batch = ht_tensor_batch.to(DEVICE)
-        r_tensor = r_tensor.to(DEVICE)
-        entity_feat = entity_feat.to(DEVICE)
-        relation_feat = relation_feat.to(DEVICE)
-        queries = queries.to(DEVICE)
-        labels = labels.to(DEVICE)
         with autocast():
             preds = model(ht_tensor_batch, r_tensor, entity_feat, relation_feat, queries)
             loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
@@ -119,6 +120,46 @@ def train():
         scaler.step(opt)
         scaler.update()
         breakpoint()
+
+
+def validate(dataset: WikiKG90MProcessedDataset, model: KGCompletionGNN, single_itr=False):
+    DEVICE = torch.device(FLAGS.device)
+    evaluator = WikiKG90MEvaluator()
+    valid_dataset = Wiki90MValidationDataset(dataset)
+    valid_dataloader = DataLoader(valid_dataset, batch_size=1, num_workers=0, shuffle=True,
+                                  collate_fn=valid_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
+    model.eval()
+    top_10s = []
+    t_corrects = []
+    with torch.no_grad():
+        for i, (batch, t_correct_index) in enumerate(tqdm.tqdm(valid_dataloader)):
+            batch_preds = []
+            for subbatch in tqdm.tqdm(batch):
+                subbatch = prepare_batch_for_model(subbatch, valid_dataset.ds)
+                subbatch = move_batch_to_device(subbatch, DEVICE)
+                ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, relation_feat, node_id_to_batch, queries, labels = subbatch
+                with autocast() if FLAGS.device == "cuda" else contextlib.suppress():
+                    preds = model(ht_tensor_batch, r_tensor, entity_feat, relation_feat, queries)
+                batch_preds.append(preds)
+            batch_preds = torch.cat(batch_preds, dim=1)
+            t_pred_top10 = batch_preds.topk(10).indices
+            t_pred_top10 = t_pred_top10.detach().cpu().numpy()
+            batch_input_dict = {'h,r->t': {'t_pred_top10': t_pred_top10, 't_correct_index': t_correct_index}}
+            top_10s.append(t_pred_top10)
+            t_corrects.append(t_correct_index)
+            # batch_result_dict = evaluator.eval(batch_input_dict)
+            # print(batch_result_dict)
+            if single_itr:
+                break
+    t_pred_top10 = np.concatenate(top_10s, axis=0)
+    t_correct_index = np.concatenate(t_corrects, axis=0)
+    input_dict = {'h,r->t': {'t_pred_top10': t_pred_top10, 't_correct_index': t_correct_index}}
+    result_dict = evaluator.eval(input_dict)
+    print(result_dict)
+
+
+def test(dataset):
+    pass
 
 
 def main(argv):
