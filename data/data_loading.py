@@ -218,11 +218,14 @@ class Wiki90MEvaluationDataset(Dataset):
                 subbatch = hrt_collate(zip(subbatch_ht, subbatch_r))
                 subbatches.append(subbatch)
 
-            t_correct_idx = []
-            for _, _, _, _t_correct_idx in batch:
-                t_correct_idx.append(_t_correct_idx)
+            t_correct_idx = None
+            if isinstance(self, Wiki90MValidationDataset):  # t_correct_index exists
+                t_correct_idx = []
+                for _, _, _, _t_correct_idx in batch:
+                    t_correct_idx.append(_t_correct_idx)
+                t_correct_idx = np.array(t_correct_idx)
 
-            return subbatches, np.array(t_correct_idx)
+            return subbatches, t_correct_idx
 
         return collate_fn
 

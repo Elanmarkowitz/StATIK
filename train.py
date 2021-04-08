@@ -70,8 +70,6 @@ def train():
         moving_average_acc = torch.tensor(0.5)
         moving_avg_rank = torch.tensor(10.0)
 
-        validate(dataset, model, single_itr=True)
-
         for i, batch in enumerate(tqdm.tqdm(train_loader)):
             model.train()
             batch = prepare_batch_for_model(batch, dataset)
@@ -126,7 +124,7 @@ def validate(dataset: WikiKG90MProcessedDataset, model: KGCompletionGNN, single_
     DEVICE = torch.device(FLAGS.device)
     evaluator = WikiKG90MEvaluator()
     valid_dataset = Wiki90MValidationDataset(dataset)
-    valid_dataloader = DataLoader(valid_dataset, batch_size=1, num_workers=0, shuffle=True,
+    valid_dataloader = DataLoader(valid_dataset, batch_size=100, num_workers=0, shuffle=True,
                                   collate_fn=valid_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
     model.eval()
     top_10s = []
