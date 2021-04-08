@@ -178,19 +178,6 @@ def load_dataset(root_data_dir: str):
     return WikiKG90MProcessedDataset(root_data_dir)
 
 
-class Wiki90MSubEvalDataset(Dataset):
-    def __init__(self, batch_h, batch_r, batch_t_candidate):
-        self.h = batch_h
-        self.r = batch_r
-        self.t_candidate = batch_t_candidate
-
-    def __len__(self):
-        return self.t_candidate.shape[1]
-
-    def __get__(self, idx):
-        return
-
-
 class Wiki90MEvaluationDataset(Dataset):
 
     def __init__(self, full_dataset: WikiKG90MProcessedDataset, task):
@@ -231,9 +218,12 @@ class Wiki90MEvaluationDataset(Dataset):
                 subbatch = hrt_collate(zip(subbatch_ht, subbatch_r))
                 subbatches.append(subbatch)
 
-            t_correct_idx = []
-            for _, _, _, _t_correct_idx in batch:
-                t_correct_idx.append(_t_correct_idx)
+            t_correct_idx = None
+            if isinstance(self, Wiki90MValidationDataset):  # t_correct_index exists
+                t_correct_idx = []
+                for _, _, _, _t_correct_idx in batch:
+                    t_correct_idx.append(_t_correct_idx)
+                t_correct_idx = np.array(t_correct_idx)
 
             return subbatches, t_correct_idx
 
