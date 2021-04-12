@@ -3,6 +3,7 @@
 import os
 import pickle
 import numpy as np
+import setproctitle
 
 import torch
 import torch.distributed as dist
@@ -147,14 +148,14 @@ def test(dataset):
 
 
 def main(argv):
-    os.environ['NCCL_SOCKET_IFNAME'] = 'ib0'
-    os.environ['GLOO_SOCKET_IFNAME'] = 'ib0'
     grank = int(os.environ['RANK'])
     ws = int(os.environ['WORLD_SIZE'])
     master_addr = os.environ['MASTER_ADDR']
     master_port = os.environ['MASTER_PORT']
     dist.init_process_group(backend=dist.Backend.NCCL,
                             init_method="tcp://{}:{}".format(master_addr, master_port), rank=grank, world_size=ws)
+
+    setproctitle.setproctitle("KGCompletionTrainer:{}".format(grank))
     train(grank, FLAGS.local_rank)
     dist.destroy_process_group()
 
