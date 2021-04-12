@@ -1,3 +1,5 @@
+# Branch keshav
+
 from collections import defaultdict
 import os
 import numpy as np 
@@ -44,11 +46,6 @@ def process_data(root_data_dir: str) -> None:
     edge_dict = defaultdict(lambda: array.array('i')) # sp.dok_matrix((dataset.num_entities, dataset.num_entities), dtype=np.int64)
     relation_dict = defaultdict(lambda: array.array('i')) # sp.dok_matrix((dataset.num_entities, dataset.num_entities), dtype=np.int64)
     degrees = np.zeros((dataset.num_entities,), dtype=np.int64)
-    degrees = np.load(os.path.join(save_dir, 'degrees.npy'))
-    with open(os.path.join(save_dir, 'edge_dict.pkl'), 'rb') as f:
-        edge_dict = pickle.load(f)
-    with open(os.path.join(save_dir, 'relation_dict.pkl'), 'rb') as f:
-        relation_dict = pickle.load(f)
     print("Building edge dict.")
     for i in tqdm.tqdm(range(len(train_ht))):
         h,r,t,r_inv = int(train_ht[i][0]), int(train_r[i]), int(train_ht[i][1]), int(train_r_inverse[i])
