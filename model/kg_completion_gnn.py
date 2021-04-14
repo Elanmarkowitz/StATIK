@@ -1,8 +1,8 @@
-# Branch keshav
-
 import torch
 from torch import nn
 from torch import Tensor
+
+from model.parameterized_sampling import ParameterizedSampler
 
 
 class MessageCalculationLayer(nn.Module):
@@ -36,16 +36,20 @@ class MessagePassingLayer(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
         self.act = nn.LeakyReLU()
 
-    def aggregate_messages(self, ht: Tensor, messages_fwd: Tensor, messages_back: Tensor, nodes_in_batch: int):
+    def aggregate_messages(self, ht: Tensor, messages_fwd: Tensor, messages_back: Tensor, p_selections: Tensor,
+                           nodes_in_batch: int):
         """
         :param ht: shape m x 2
         :param messages_fwd: shape m x embed_dim
         :param messages_back: shape m x embed_dim
+        :param p_selections: shape m x 1
         :param nodes_in_batch: int
         :return: aggregated messages. shape nodes_in_batch x embed_dim
         """
         device = messages_fwd.device
         msg_dst = torch.cat([ht[:, 1], ht[:, 0]])
+        messages_fwd = messages_fwd * p_selections / p_selections.detach()
+        messages_back = messages_back * p_selections / p_selections.detach()
         messages = torch.cat([messages_fwd, messages_back], dim=0)
         agg_messages = torch.zeros((nodes_in_batch, self.embed_dim), dtype=messages_fwd.dtype, device=device)
         agg_messages = torch.scatter_add(agg_messages, 0, msg_dst.reshape(-1, 1).expand(-1, self.embed_dim), messages)
@@ -55,17 +59,19 @@ class MessagePassingLayer(nn.Module):
         agg_messages = agg_messages / num_msgs.reshape(-1, 1)  # take mean of messages
         return agg_messages
 
-    def forward(self, H: Tensor, E: Tensor, ht: Tensor, r_embed):
+    def forward(self, H: Tensor, E: Tensor, ht: Tensor, r_embed, p_selections: Tensor):
         """
         :param H: shape n x embed_dim
         :param E: shape m x embed_dim
         :param ht: shape m x 2
         :param r_embed: shape m x embed_dim
+        :param p_selections: shape m
         :return:
         """
+        p_selections = p_selections.reshape(-1, 1)
         messages_fwd = self.calc_messages_fwd(H, E, ht[:, 0], r_embed)
         messages_back = self.calc_messages_back(H, E, ht[:, 1], r_embed)
-        aggregated_messages = self.aggregate_messages(ht, messages_fwd, messages_back, H.shape[0])
+        aggregated_messages = self.aggregate_messages(ht, messages_fwd, messages_back, p_selections, H.shape[0])
         out = self.norm(self.act(aggregated_messages) + H)
         return out
 
@@ -120,10 +126,15 @@ class EdgeUpdateLayer(nn.Module):
 
 
 class KGCompletionGNN(nn.Module):
-    def __init__(self, num_relations: int, input_dim: int, embed_dim: int, num_layers: int):
+    def __init__(self, num_relations: int, input_dim: int, embed_dim: int, num_layers: int,
+                 parameterized_sampling: bool = False):
         super(KGCompletionGNN, self).__init__()
         self.embed_dim = embed_dim
         self.num_layers = num_layers
+
+        if parameterized_sampling:
+            self.head_sampler = ParameterizedSampler(num_relations, 2*num_relations)
+            self.tail_sampler = ParameterizedSampler(num_relations, 2*num_relations)
 
         self.relation_embedding = nn.Embedding(num_relations, embed_dim)
         self.edge_input_transform = nn.Linear(input_dim + 1, embed_dim)
@@ -142,7 +153,8 @@ class KGCompletionGNN(nn.Module):
 
         self.act = nn.LeakyReLU()
 
-    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, relation_feat: Tensor, queries: Tensor) -> Tensor:
+    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, relation_feat: Tensor, p_selections: Tensor,
+                queries: Tensor,) -> Tensor:
         r_embed = self.relation_embedding(r_tensor)
         H_0 = self.act(self.entity_input_transform(entity_feat))
         H_0 = self.norm_entity(H_0)
@@ -154,7 +166,7 @@ class KGCompletionGNN(nn.Module):
         E = E_0
 
         for i in range(self.num_layers):
-            H = self.message_passing_layers[i](H, E, ht, r_embed)
+            H = self.message_passing_layers[i](H, E, ht, r_embed, p_selections)
             E = self.edge_update_layers[i](H, E, ht)
 
         out = self.classify_triple(H, E, H_0, E_0, ht, queries)

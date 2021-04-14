@@ -1,10 +1,7 @@
-# Branch Keshav
-
 from array import array
 from ogb.lsc import WikiKG90MDataset
 import torch
 from torch.utils.data import Dataset
-import random
 import numpy as np 
 
 from data import data_processing
@@ -65,15 +62,22 @@ class WikiKG90MProcessedDataset(Dataset):
 
         return batch_ht[0], batch_r, np.array([batch_ht[1]])
 
-    def sample_neighbors(self, node, max_neighbors: int):
-        if self.degrees[node] > max_neighbors:
-            selection = np.random.randint(self.degrees[node], size=(max_neighbors,))
-            tails = self.edge_lccsr[node][selection]
-            rels = self.relation_lccsr[node][selection]
+    def sample_neighbors(self, node, max_neighbors: int, query_r: int = None, sampler: torch.nn.Module = None):
+        assert query_r is not None if sampler is not None else True
+        tails = self.edge_lccsr[node]
+        rels = self.relation_lccsr[node]
+        p_selection = None
+        if sampler is not None:
+            selection, p_selection = sampler(query_r, rels, max_neighbors)
+            selection = selection.detach().cpu().numpy()
+            tails = tails[selection]
+            rels = rels[selection]
         else:
-            tails = self.edge_lccsr[node]
-            rels = self.relation_lccsr[node]
-        return rels, tails
+            if self.degrees[node] > max_neighbors:
+                selection = np.random.randint(self.degrees[node], size=(max_neighbors,))
+                tails = self.edge_lccsr[node][selection]
+                rels = self.relation_lccsr[node][selection]
+        return rels, tails, p_selection if sampler is not None else None
 
     @staticmethod
     def ignore_query(rels, tails, ignore_r, ignore_t):
@@ -100,7 +104,7 @@ class WikiKG90MProcessedDataset(Dataset):
         edge_tails.extend(np.repeat(node, count_backward))
         edge_relations.extend(rels[inverse_relation_idx] - self.num_relations)
 
-    def create_component(self, h, rels_h, tails_h, t, rels_t, tails_t, r, label):
+    def create_component(self, h, rels_h, tails_h, t, rels_t, tails_t, r, label, p_selection_h=None, p_selection_t=None):
         entity_set = set()
         edge_heads = array("i")
         edge_tails = array("i")
@@ -118,18 +122,23 @@ class WikiKG90MProcessedDataset(Dataset):
         is_query = np.zeros((len(edge_heads),), dtype=np.int64)
         is_query[-1] = 1
 
+        if p_selection_h is not None and p_selection_t is not None:
+            p_select = torch.cat([p_selection_h, p_selection_t, torch.ones((1,), device=p_selection_t.device)])
+        else:
+            p_select = None
+
         entity_set_list = list(entity_set)
         batch_id_to_node_id = np.array(entity_set_list)
         node_id_to_batch_node_id = dict((e, i) for (i, e) in enumerate(entity_set_list))
         edge_heads = np.array([node_id_to_batch_node_id[e] for e in edge_heads])
         edge_tails = np.array([node_id_to_batch_node_id[e] for e in edge_tails])
 
-        return (edge_heads, edge_relations, edge_tails, is_query, label, batch_id_to_node_id), len(entity_set)
+        return (edge_heads, edge_relations, edge_tails, is_query, label, batch_id_to_node_id, p_select), len(entity_set)
 
     @staticmethod
     def add_component(edge_heads, edge_relations, edge_tails, is_query, labels, cumulative_entities,
-                      batch_id_to_node_id, component):
-        c_edge_heads, c_edge_relations, c_edge_tails, c_is_query, c_label, c_batch_id_to_node_id = component
+                      batch_id_to_node_id, p_selections, component):
+        c_edge_heads, c_edge_relations, c_edge_tails, c_is_query, c_label, c_batch_id_to_node_id, p_select = component
 
         edge_heads.extend(c_edge_heads + cumulative_entities)
         edge_tails.extend(c_edge_tails + cumulative_entities)
@@ -137,20 +146,26 @@ class WikiKG90MProcessedDataset(Dataset):
         is_query.extend(c_is_query)
         labels.append(c_label)
         batch_id_to_node_id.extend(c_batch_id_to_node_id)
+        if p_select is not None:
+            p_selections.append(p_select)
 
         return
 
-    def get_collate_fn(self, max_neighbors: int = 10, read_memmap: bool = False, sample_negs: int = 0):
+    def get_collate_fn(self, max_neighbors: int = 10, read_memmap: bool = False, sample_negs: int = 0,
+                       head_sampler: torch.nn.Module = None, tail_sampler: torch.nn.Module = None):
+        assert (head_sampler is None and tail_sampler is None) or (head_sampler is not None and tail_sampler is not None), "Requires both head_sampler and tail_sampler if given."
+
         def wikikg_collate_fn(batch):
+            parameterized_sampling = head_sampler is not None
             # query edge marked as query
             # 1-hop connected entities included
             batch_id_to_node_id = array("i")
-            node_id_to_batch_id = np.empty((self.num_entities,), dtype=np.int64)
             edge_heads = array("i")
             edge_tails = array("i")
             edge_relations = array("i")
             is_query = array("i")
             labels = array("i")
+            p_selections = []
             cumulative_entities = 0
 
             if sample_negs:
@@ -162,11 +177,11 @@ class WikiKG90MProcessedDataset(Dataset):
                 t_candidates = np.concatenate([_ts, _neg_ts])
                 sample_labels = np.concatenate([np.ones_like(_ts), np.zeros_like(_neg_ts)])
 
-                rels_h, tails_h = self.sample_neighbors(_h, max_neighbors)
+                rels_h, tails_h, p_selection_h = self.sample_neighbors(_h, max_neighbors, query_r=_r, sampler=head_sampler)
 
                 for _t, _label in zip(t_candidates, sample_labels):
 
-                    rels_t, tails_t = self.sample_neighbors(_t, max_neighbors)
+                    rels_t, tails_t, p_selection_t = self.sample_neighbors(_t, max_neighbors, query_r=_r, sampler=tail_sampler)
 
                     rels_h_t, tails_h_t = self.ignore_query(rels_h, tails_h, _r, _t)
                     rels_t, tails_t = self.ignore_query(rels_t, tails_t, _r + self.num_relations, _h)
@@ -174,7 +189,8 @@ class WikiKG90MProcessedDataset(Dataset):
                     component, c_size = self.create_component(_h, rels_h_t, tails_h_t, _t, rels_t, tails_t, _r, _label)
 
                     self.add_component(edge_heads, edge_relations, edge_tails, is_query, labels, cumulative_entities,
-                                       batch_id_to_node_id, component)
+                                       batch_id_to_node_id, p_selections, component)
+
                     cumulative_entities += c_size
 
             ht_tensor = torch.from_numpy(np.stack([edge_heads, edge_tails]).transpose()).long()
@@ -183,7 +199,8 @@ class WikiKG90MProcessedDataset(Dataset):
             entity_feat = torch.from_numpy(self.entity_feat[batch_id_to_node_id]).float() if read_memmap else None
             queries = torch.from_numpy(np.array(is_query)).long()
             labels = torch.from_numpy(np.array(labels)).long()
-            return ht_tensor, r_tensor, entity_set, entity_feat, queries, labels
+            p_selections = torch.cat(p_selections) if parameterized_sampling else None
+            return ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, p_selections
         return wikikg_collate_fn
 
 
@@ -217,9 +234,13 @@ class Wiki90MEvaluationDataset(Dataset):
     def sub_batch_loader(self, batch):
         pass
 
-    def get_eval_collate_fn(self, max_neighbors=10, read_memmap=False):
+    def get_eval_collate_fn(self, max_neighbors=10, read_memmap=False,
+                            head_sampler: torch.nn.Module = None, tail_sampler: torch.nn.Module = None):
+        assert (head_sampler is None and tail_sampler is None) or (head_sampler is not None and tail_sampler is not None), "Requires both head_sampler and tail_sampler if given."
+
         def collate_fn(batch):
-            hrt_collate = self.ds.get_collate_fn(max_neighbors=max_neighbors, read_memmap=read_memmap)
+            hrt_collate = self.ds.get_collate_fn(max_neighbors=max_neighbors, read_memmap=read_memmap,
+                                                 head_sampler=head_sampler, tail_sampler=tail_sampler)
 
             batch_h = array("i")
             batch_r = array("i")

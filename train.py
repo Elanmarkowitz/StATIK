@@ -2,9 +2,9 @@ from absl import app, flags
 import os
 import pickle
 import numpy as np
+import tqdm
 
 import setproctitle
-import tqdm
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -26,34 +26,37 @@ flags.DEFINE_integer("num_workers", 0, "Number of workers for the dataloader.")
 flags.DEFINE_float("lr", 1e-2, "Learning rate for optimizer.")
 flags.DEFINE_string("device", "cuda", "Device to use (cuda/cpu).")
 flags.DEFINE_integer("print_freq", 1024, "How frequently to print learning statistics in number of iterations")
-flags.DEFINE_integer("local_rank", 0, "How frequently to print learning statistics in number of iterations")
+flags.DEFINE_integer("local_rank", 0, "How frequently to print learning statistics in number of iterations")  # TODO: fix help message
 flags.DEFINE_integer("validate_every", 1024, "How many iterations to do between each single batch validation.")
 flags.DEFINE_integer("validation_batches", 1000, "Number of batches to do for each validation check.")
 flags.DEFINE_integer("valid_batch_size", 1, "Batch size for validation (does all t_candidates at once).")
+flags.DEFINE_bool("parameterized_sampling", True, "Should parameterized sampling be used?")
 
 DEBUGGING_MODEL = False
 
 
 def prepare_batch_for_model(batch, dataset: WikiKG90MProcessedDataset, save_batch=False):
-    ht_tensor, r_tensor, entity_set, entity_feat, queries, labels = batch
+    ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, p_selections = batch
     if entity_feat is None:
         entity_feat = torch.from_numpy(dataset.entity_feat[entity_set]).float()
     relation_feat = torch.tensor(dataset.relation_feat).float()
-    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels
+    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, p_selections
     if save_batch:
         pickle.dump(batch, open('sample_batch.pkl', 'wb'))
     return batch
 
 
 def move_batch_to_device(batch, device):
-    ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels = batch
+    ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, p_selections = batch
     ht_tensor = ht_tensor.to(device)
     r_tensor = r_tensor.to(device)
     entity_feat = entity_feat.to(device)
     relation_feat = relation_feat.to(device)
     queries = queries.to(device)
     labels = labels.to(device)
-    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels
+    if p_selections is not None:
+        p_selections = p_selections.to(device)
+    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, p_selections
     return batch
 
 
@@ -61,11 +64,19 @@ def train(global_rank, local_rank):
     torch.cuda.set_device(local_rank)
     dataset = load_dataset(FLAGS.root_data_dir)
     sampler = DistributedSampler(dataset, rank=global_rank, shuffle=True)
-    train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size,
-                              num_workers=FLAGS.num_workers, sampler=sampler,
-                              collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, sample_negs=1))
-    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers)
+    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers,
+                            parameterized_sampling=FLAGS.parameterized_sampling)
     model.to(local_rank)
+    if FLAGS.parameterized_sampling:
+        train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size, num_workers=FLAGS.num_workers, sampler=sampler,
+                                  collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node,
+                                                                    sample_negs=1,
+                                                                    head_sampler=model.head_sampler,
+                                                                    tail_sampler=model.tail_sampler))
+    else:
+        train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size, num_workers=FLAGS.num_workers, sampler=sampler,
+                                  collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node,
+                                                                    sample_negs=1))
     ddp_model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     opt = optim.Adam(ddp_model.parameters(), lr=FLAGS.lr)
     moving_average_loss = torch.tensor(1.0)
@@ -75,8 +86,8 @@ def train(global_rank, local_rank):
         ddp_model.train()
         batch = prepare_batch_for_model(batch, dataset)
         batch = move_batch_to_device(batch, local_rank)
-        ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels = batch
-        preds = ddp_model(ht_tensor, r_tensor, entity_feat, relation_feat, queries)
+        ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, p_selections = batch
+        preds = ddp_model(ht_tensor, r_tensor, entity_feat, relation_feat, p_selections, queries)
         loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
 
         correct = torch.eq((preds > 0).long().flatten(), labels)
@@ -117,8 +128,8 @@ def validate(dataset: WikiKG90MProcessedDataset, model: torch.nn.Module, num_bat
         for i, (batch, t_correct_index) in enumerate(valid_dataloader):
             batch = prepare_batch_for_model(batch, valid_dataset.ds)
             batch = move_batch_to_device(batch, 0)  # TODO: This probably needs to be changed for DDP
-            ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, _ = batch
-            preds = model(ht_tensor, r_tensor, entity_feat, relation_feat, queries)
+            ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, _, p_selections = batch
+            preds = model(ht_tensor, r_tensor, entity_feat, relation_feat, p_selections, queries)
             preds = preds.reshape(VALID_BATCH_SIZE, 1001)
             t_pred_top10 = preds.topk(10).indices
             t_pred_top10 = t_pred_top10.detach().cpu().numpy()
