@@ -1,15 +1,14 @@
-# Branch keshav
-
+from absl import app, flags
 import os
 import pickle
 import numpy as np
+
 import setproctitle
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import torch.optim as optim
-from absl import app, flags
 from ogb.lsc import WikiKG90MEvaluator
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
@@ -31,30 +30,32 @@ flags.DEFINE_integer("print_freq", 1024, "How frequently to print learning stati
 flags.DEFINE_integer("local_rank", 0, "How frequently to print learning statistics in number of iterations")
 flags.DEFINE_integer("validate_every", 1024, "How many iterations to do between each single batch validation.")
 flags.DEFINE_bool("edge_attention", False, "Whether or not to attend to ")
+flags.DEFINE_integer("validation_batches", 1000, "Number of batches to do for each validation check.")
+flags.DEFINE_integer("valid_batch_size", 1, "Batch size for validation (does all t_candidates at once).")
 
 DEBUGGING_MODEL = False
 
 
 def prepare_batch_for_model(batch, dataset: WikiKG90MProcessedDataset, save_batch=False):
-    ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, node_id_to_batch, queries, labels = batch
+    ht_tensor, r_tensor, entity_set, entity_feat, queries, labels = batch
     if entity_feat is None:
         entity_feat = torch.from_numpy(dataset.entity_feat[entity_set]).float()
     relation_feat = torch.tensor(dataset.relation_feat).float()
-    batch = ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, relation_feat, node_id_to_batch, queries, labels
+    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels
     if save_batch:
         pickle.dump(batch, open('sample_batch.pkl', 'wb'))
     return batch
 
 
 def move_batch_to_device(batch, device):
-    ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, relation_feat, node_id_to_batch, queries, labels = batch
-    ht_tensor_batch = ht_tensor_batch.to(device)
+    ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels = batch
+    ht_tensor = ht_tensor.to(device)
     r_tensor = r_tensor.to(device)
     entity_feat = entity_feat.to(device)
     relation_feat = relation_feat.to(device)
     queries = queries.to(device)
     labels = labels.to(device)
-    batch = ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, relation_feat, node_id_to_batch, queries, labels
+    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels
     return batch
 
 
@@ -64,7 +65,7 @@ def train(global_rank, local_rank):
     train_sampler = DistributedSampler(dataset, rank=global_rank, shuffle=True)
     train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size,
                               num_workers=FLAGS.num_workers, sampler=train_sampler,
-                              collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node))
+                              collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, sample_negs=1))
 
     valid_dataset = Wiki90MValidationDataset(dataset)
     valid_sampler = DistributedSampler(valid_dataset, rank=global_rank, shuffle=True)
@@ -84,14 +85,14 @@ def train(global_rank, local_rank):
         ddp_model.train()
         batch = prepare_batch_for_model(batch, dataset)
         batch = move_batch_to_device(batch, local_rank)
-        ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, relation_feat, node_id_to_batch, queries, labels = batch
-        preds = ddp_model(ht_tensor_batch, r_tensor, entity_feat, relation_feat, queries)
+        ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels = batch
+        preds = ddp_model(ht_tensor, r_tensor, entity_feat, relation_feat, queries)
         loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
 
         correct = torch.eq((preds > 0).long().flatten(), labels)
-        score_1 = preds[labels == 1].detach().flatten()[0]
-        score_0 = torch.topk(preds[labels == 0].detach().flatten().float()[:100], k=9).values
-        rank = 1 + (score_1 < score_0).sum()
+        score_1 = preds[labels == 1].detach().cpu().flatten()[0]
+        score_0 = torch.topk(preds[labels == 0].detach().cpu().flatten().float()[:100], k=9).values
+        rank = 1 + torch.less(score_1, score_0).sum()
         moving_avg_rank = .9995 * moving_avg_rank + .0005 * rank.float()
 
         training_acc = correct.float().mean()
@@ -119,7 +120,7 @@ def train(global_rank, local_rank):
 
         if (i + 1) % FLAGS.validate_every == 0 and global_rank == 0:
             ddp_model.eval()
-            result = validate(valid_dataset, valid_dataloader, ddp_model.module, single_itr=True)
+            result = validate(valid_dataset, valid_dataloader, ddp_model.module, num_batches=FLAGS.validation_batches)
             mrr = result['mrr']
             if mrr > max_mrr:
                 max_mrr = mrr
@@ -132,30 +133,24 @@ def train(global_rank, local_rank):
 
 
 # Validating only on global rank 0 for now
-def validate(valid_dataset: Dataset, valid_dataloader: DataLoader, model: KGCompletionGNN, single_itr=False):
+def validate(valid_dataset: Dataset, valid_dataloader: DataLoader, model: KGCompletionGNN, num_batches: int = None):
     evaluator = WikiKG90MEvaluator()
 
     top_10s = []
     t_corrects = []
     with torch.no_grad():
-        for i, (batch, t_correct_index) in enumerate(tqdm(valid_dataloader)):
-            batch_preds = []
-            for subbatch in batch:
-                subbatch = prepare_batch_for_model(subbatch, valid_dataset.ds)
-                subbatch = move_batch_to_device(subbatch, 0)
-                ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, relation_feat, node_id_to_batch, queries, labels = subbatch
-                preds = model(ht_tensor_batch, r_tensor, entity_feat, relation_feat, queries)
-                batch_preds.append(preds)
-
-            batch_preds = torch.cat(batch_preds, dim=1)
-            t_pred_top10 = batch_preds.topk(10).indices
+        for i, (batch, t_correct_index) in enumerate(valid_dataloader):
+            batch = prepare_batch_for_model(batch, valid_dataset.ds)
+            batch = move_batch_to_device(batch, 0)  # TODO: This probably needs to be changed for DDP
+            ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, _ = batch
+            preds = model(ht_tensor, r_tensor, entity_feat, relation_feat, queries)
+            preds = preds.reshape(VALID_BATCH_SIZE, 1001)
+            t_pred_top10 = preds.topk(10).indices
             t_pred_top10 = t_pred_top10.detach().cpu().numpy()
             top_10s.append(t_pred_top10)
             t_corrects.append(t_correct_index)
-
-            if single_itr and i == 25:
+            if num_batches and num_batches == (i + 1):
                 break
-
     t_pred_top10 = np.concatenate(top_10s, axis=0)
     t_correct_index = np.concatenate(t_corrects, axis=0)
     input_dict = {'h,r->t': {'t_pred_top10': t_pred_top10, 't_correct_index': t_correct_index}}
