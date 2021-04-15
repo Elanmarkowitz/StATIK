@@ -4,14 +4,18 @@ import torch
 from torch import nn
 from torch import Tensor
 
+import pdb
+
 
 class MessageCalculationLayer(nn.Module):
-    def __init__(self, embed_dim: int):
+    def __init__(self, embed_dim: int, edge_attention=False):
         super(MessageCalculationLayer, self).__init__()
         self.embed_dim = embed_dim
         self.transform_message = nn.Linear(4 * embed_dim, embed_dim)
+        self.message_weighting_function = MessageWeightingFunction(embed_dim, embed_dim // 2)
+        self.edge_attention = edge_attention
 
-    def forward(self, H: Tensor, E: Tensor, heads: Tensor, r_embed: Tensor):
+    def forward(self, H: Tensor, E: Tensor, heads: Tensor, r_embed: Tensor, queries: Tensor):
         """
         :param H: shape n x embed_dim
         :param E: shape m x embed_dim
@@ -23,16 +27,45 @@ class MessageCalculationLayer(nn.Module):
         H_heads = H[heads]
         raw_messages = torch.cat([H_heads, E, H_heads * r_embed, E * r_embed], dim=1)
         messages = self.transform_message(raw_messages)
+        message_weights = self.message_weighting_function(E, queries) if self.edge_attention else None
+
         # TODO: Maybe normalize
-        return messages
+        return message_weights * messages if self.edge_attention else messages
+
+
+class MessageWeightingFunction(nn.Module):
+    def __init__(self, relation_embed_dim: int, attention_dim: int):
+        super(MessageWeightingFunction, self).__init__()
+        self.relation_embed_dim = relation_embed_dim
+        self.attention_dim = attention_dim
+        self.Q = nn.Linear(relation_embed_dim, attention_dim, bias=False)
+        self.K = nn.Linear(relation_embed_dim, attention_dim, bias=False)
+        self.softmax = nn.Softmax(dim=0)
+
+    # Computes the attention scores between the relation embeddings of all sampled edges with the relation type of the query
+    def compute_attention_scores(self, Q: Tensor, K: Tensor):
+        attention_scores = torch.matmul(Q, K.T)
+        return self.softmax(attention_scores)
+
+    def forward(self, relation_embeds: Tensor, queries: Tensor):
+        attention_scores = []
+        batch_separation_points = [0] + (queries.nonzero(as_tuple=False).flatten() + 1).tolist()
+        for i in range(1, len(batch_separation_points)):
+            batch_slice = relation_embeds[batch_separation_points[i - 1]: batch_separation_points[i], :]
+            Q = self.Q(batch_slice[-1, :])  # Transformed Q of the query relation
+            K = self.K(batch_slice)  # Transformed Ks of all the sampled edges + query edge
+            batch_attention_scores = self.compute_attention_scores(Q, K)
+            attention_scores.append(batch_attention_scores)
+
+        return torch.cat(attention_scores)
 
 
 class MessagePassingLayer(nn.Module):
-    def __init__(self, embed_dim: int):
+    def __init__(self, embed_dim: int, edge_attention=False):
         super(MessagePassingLayer, self).__init__()
         self.embed_dim = embed_dim
-        self.calc_messages_fwd = MessageCalculationLayer(embed_dim)
-        self.calc_messages_back = MessageCalculationLayer(embed_dim)
+        self.calc_messages_fwd = MessageCalculationLayer(embed_dim, edge_attention)
+        self.calc_messages_back = MessageCalculationLayer(embed_dim, edge_attention)
         self.norm = nn.LayerNorm(embed_dim)
         self.act = nn.LeakyReLU()
 
@@ -55,7 +88,7 @@ class MessagePassingLayer(nn.Module):
         agg_messages = agg_messages / num_msgs.reshape(-1, 1)  # take mean of messages
         return agg_messages
 
-    def forward(self, H: Tensor, E: Tensor, ht: Tensor, r_embed):
+    def forward(self, H: Tensor, E: Tensor, ht: Tensor, r_embed, queries):
         """
         :param H: shape n x embed_dim
         :param E: shape m x embed_dim
@@ -63,8 +96,8 @@ class MessagePassingLayer(nn.Module):
         :param r_embed: shape m x embed_dim
         :return:
         """
-        messages_fwd = self.calc_messages_fwd(H, E, ht[:, 0], r_embed)
-        messages_back = self.calc_messages_back(H, E, ht[:, 1], r_embed)
+        messages_fwd = self.calc_messages_fwd(H, E, ht[:, 0], r_embed, queries)
+        messages_back = self.calc_messages_back(H, E, ht[:, 1], r_embed, queries)
         aggregated_messages = self.aggregate_messages(ht, messages_fwd, messages_back, H.shape[0])
         out = self.norm(self.act(aggregated_messages) + H)
         return out
@@ -99,7 +132,7 @@ class EdgeUpdateLayer(nn.Module):
         super(EdgeUpdateLayer, self).__init__()
         self.embed_dim = embed_dim
         self.alpha = nn.Parameter(torch.tensor(0.0).float())
-        self.edge_update = nn.Linear(3*embed_dim, embed_dim)
+        self.edge_update = nn.Linear(3 * embed_dim, embed_dim)
         self.norm = nn.LayerNorm(embed_dim)
         self.act = nn.LeakyReLU()
 
@@ -120,7 +153,7 @@ class EdgeUpdateLayer(nn.Module):
 
 
 class KGCompletionGNN(nn.Module):
-    def __init__(self, num_relations: int, input_dim: int, embed_dim: int, num_layers: int):
+    def __init__(self, num_relations: int, input_dim: int, embed_dim: int, num_layers: int, edge_attention=False):
         super(KGCompletionGNN, self).__init__()
         self.embed_dim = embed_dim
         self.num_layers = num_layers
@@ -135,7 +168,7 @@ class KGCompletionGNN(nn.Module):
         self.edge_update_layers = nn.ModuleList()
 
         for i in range(num_layers):
-            self.message_passing_layers.append(MessagePassingLayer(embed_dim))
+            self.message_passing_layers.append(MessagePassingLayer(embed_dim, edge_attention=edge_attention))
             self.edge_update_layers.append(EdgeUpdateLayer(embed_dim))
 
         self.classify_triple = TripleClassificationLayer(embed_dim)
@@ -154,9 +187,9 @@ class KGCompletionGNN(nn.Module):
         E = E_0
 
         for i in range(self.num_layers):
-            H = self.message_passing_layers[i](H, E, ht, r_embed)
+            H = self.message_passing_layers[i](H, E, ht, r_embed, queries)
             E = self.edge_update_layers[i](H, E, ht)
 
         out = self.classify_triple(H, E, H_0, E_0, ht, queries)
-        return out
 
+        return out
