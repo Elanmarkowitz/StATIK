@@ -1,6 +1,6 @@
 # Branch Keshav
 
-import array
+from array import array
 from ogb.lsc import WikiKG90MDataset
 import torch
 from torch.utils.data import Dataset
@@ -63,12 +63,9 @@ class WikiKG90MProcessedDataset(Dataset):
         batch_ht = self.train_ht[idx]
         batch_r = self.train_r[idx]
 
-        return batch_ht, batch_r
+        return batch_ht[0], batch_r, np.array([batch_ht[1]])
 
-    #@profile
-    def add_neighbors_for_batch(self, entity_set: set, edge_heads: array, edge_tails: array, edge_relations: array,
-                                is_query: array, node, ignore_r, ignore_t, max_neighbors: int):
-        # TODO: inverse relation should load as original relation in reverse order. Let Model handle inverse
+    def sample_neighbors(self, node, max_neighbors: int):
         if self.degrees[node] > max_neighbors:
             selection = np.random.randint(self.degrees[node], size=(max_neighbors,))
             tails = self.edge_lccsr[node][selection]
@@ -76,12 +73,20 @@ class WikiKG90MProcessedDataset(Dataset):
         else:
             tails = self.edge_lccsr[node]
             rels = self.relation_lccsr[node]
-        non_ignored_idx = np.logical_or(tails != ignore_t, rels != ignore_r) # do not include query relation here
+        return rels, tails
+
+    @staticmethod
+    def ignore_query(rels, tails, ignore_r, ignore_t):
+        non_ignored_idx = np.logical_or(tails != ignore_t, rels != ignore_r)
         rels = rels[non_ignored_idx]
         tails = tails[non_ignored_idx]
+        return rels, tails
+
+    def add_relations_with_inverting(self, node, rels, tails, entity_set: set, edge_heads: array, edge_tails: array,
+                                     edge_relations: array):
         inverse_relation_idx = rels >= self.num_relations
         forward_relation_idx = np.logical_not(inverse_relation_idx)
-
+        entity_set.add(node)
         for t in tails:
             entity_set.add(t)
 
@@ -95,84 +100,92 @@ class WikiKG90MProcessedDataset(Dataset):
         edge_tails.extend(np.repeat(node, count_backward))
         edge_relations.extend(rels[inverse_relation_idx] - self.num_relations)
 
-        is_query.extend(np.repeat(0, count_forward + count_backward))
+    def create_component(self, h, rels_h, tails_h, t, rels_t, tails_t, r, label):
+        entity_set = set()
+        edge_heads = array("i")
+        edge_tails = array("i")
+        edge_relations = array("i")
 
-        # zipped_itr = zip(tails, rels)
-        # for tail, rel in zipped_itr:
-        #     entity_set.add(tail)
-        #     if rel > self.num_relations:  # inverse relation
-        #         edge_heads.append(tail)
-        #         edge_tails.append(node)
-        #         edge_relations.append(rel - self.num_relations)
-        #     else:
-        #         edge_heads.append(node)
-        #         edge_tails.append(tail)
-        #         edge_relations.append(rel)
-        #     is_query.append(0)
+        self.add_relations_with_inverting(h, rels_h, tails_h, entity_set, edge_heads, edge_tails, edge_relations)
+        self.add_relations_with_inverting(t, rels_t, tails_t, entity_set, edge_heads, edge_tails, edge_relations)
+
+        entity_set.add(h)
+        entity_set.add(t)
+        edge_heads.append(h)
+        edge_relations.append(r)
+        edge_tails.append(t)
+
+        is_query = np.zeros((len(edge_heads),), dtype=np.int64)
+        is_query[-1] = 1
+
+        entity_set_list = list(entity_set)
+        batch_id_to_node_id = np.array(entity_set_list)
+        node_id_to_batch_node_id = dict((e, i) for (i, e) in enumerate(entity_set_list))
+        edge_heads = np.array([node_id_to_batch_node_id[e] for e in edge_heads])
+        edge_tails = np.array([node_id_to_batch_node_id[e] for e in edge_tails])
+
+        return (edge_heads, edge_relations, edge_tails, is_query, label, batch_id_to_node_id), len(entity_set)
+
+    @staticmethod
+    def add_component(edge_heads, edge_relations, edge_tails, is_query, labels, cumulative_entities,
+                      batch_id_to_node_id, node_id_to_batch_id, component):
+        c_edge_heads, c_edge_relations, c_edge_tails, c_is_query, c_label, c_batch_id_to_node_id = component
+
+        edge_heads.extend(c_edge_heads + cumulative_entities)
+        edge_tails.extend(c_edge_tails + cumulative_entities)
+        edge_relations.extend(c_edge_relations)
+        is_query.extend(c_is_query)
+        labels.append(c_label)
+        batch_id_to_node_id.extend(c_batch_id_to_node_id)
+        node_id_to_batch_id[c_batch_id_to_node_id] = np.arange(0, c_batch_id_to_node_id.shape[0])
+
         return
 
-    def get_collate_fn(self, single_query_per_head: bool = True, max_neighbors: int = 10, read_memmap: bool = False,
-                       eval_mode: bool = False):
-        #@profile
+    def get_collate_fn(self, max_neighbors: int = 10, read_memmap: bool = False, sample_negs: int = 0):
         def wikikg_collate_fn(batch):
             # query edge marked as query
             # 1-hop connected entities included
+            batch_id_to_node_id = array("i")
+            node_id_to_batch_id = np.empty((self.num_entities,), dtype=np.int64)
+            edge_heads = array("i")
+            edge_tails = array("i")
+            edge_relations = array("i")
+            is_query = array("i")
+            labels = array("i")
+            cumulative_entities = 0
 
-            entity_set = set()
-            edge_heads = array.array("i")
-            edge_tails = array.array("i")
-            edge_relations = array.array("i")
-            is_query = array.array("i")
-            labels = array.array("i")
+            if sample_negs:
+                neg_candidates = np.random.randint(0, self.num_entities, size=(len(batch), sample_negs))
+            else:
+                neg_candidates = np.empty((len(batch), 0), dtype=np.int64)
 
-            def add_neighbors(node, ignore_r, ignore_t):
-                return self.add_neighbors_for_batch(entity_set, edge_heads, edge_tails, edge_relations, is_query, node,
-                                                    ignore_r, ignore_t, max_neighbors)
+            for (_h, _r, _ts), _neg_ts in zip(batch, neg_candidates):
+                t_candidates = np.concatenate([_ts, _neg_ts])
+                sample_labels = np.concatenate([np.ones_like(_ts), np.zeros_like(_neg_ts)])
 
-            for _ht, _r in batch:
-                # get neighbors of h and t
-                _h, _t = _ht[0], _ht[1]
-                _label = 1
-                
-                if single_query_per_head and not eval_mode:
-                    if random.choice([True, False]):
-                        _t = random.randrange(self.num_entities)
-                        _label = 0
+                rels_h, tails_h = self.sample_neighbors(_h, max_neighbors)
 
-                add_neighbors(_h, _r, _t)
-                add_neighbors(_t, _r + self.num_relations, _h)
+                for _t, _label in zip(t_candidates, sample_labels):
 
-                # add positive query
-                entity_set.add(_h)
-                entity_set.add(_t)
-                edge_heads.append(_h)
-                edge_tails.append(_t)
-                edge_relations.append(_r)
-                is_query.append(1)
-                labels.append(_label)
+                    rels_t, tails_t = self.sample_neighbors(_t, max_neighbors)
 
-                # add negative sample
-                if not single_query_per_head and not eval_mode:
-                    neg_t = random.randrange(self.num_entities)
-                    add_neighbors(neg_t, _r + self.num_relations, _h)
-                    # add negative query
-                    entity_set.add(neg_t)
-                    edge_heads.append(_h)
-                    edge_tails.append(neg_t)
-                    edge_relations.append(_r)
-                    is_query.append(1)
-                    labels.append(0)
+                    rels_h_t, tails_h_t = self.ignore_query(rels_h, tails_h, _r, _t)
+                    rels_t, tails_t = self.ignore_query(rels_t, tails_t, _r + self.num_relations, _h)
+
+                    component, c_size = self.create_component(_h, rels_h_t, tails_h_t, _t, rels_t, tails_t, _r, _label)
+
+                    self.add_component(edge_heads, edge_relations, edge_tails, is_query, labels, cumulative_entities,
+                                       batch_id_to_node_id, node_id_to_batch_id, component)
+                    cumulative_entities += c_size
 
             ht_tensor = torch.from_numpy(np.stack([edge_heads, edge_tails]).transpose()).long()
             r_tensor = torch.from_numpy(np.array(edge_relations)).long()
-            entity_set = torch.tensor(list(entity_set)).long()
-            entity_feat = torch.from_numpy(self.entity_feat[entity_set]).float() if read_memmap else None
+            entity_set = torch.from_numpy(np.array(batch_id_to_node_id)).long()
+            entity_feat = torch.from_numpy(self.entity_feat[batch_id_to_node_id]).float() if read_memmap else None
+            node_id_to_batch_id = torch.from_numpy(node_id_to_batch_id)
             queries = torch.from_numpy(np.array(is_query)).long()
             labels = torch.from_numpy(np.array(labels)).long()
-            node_id_to_batch = torch.empty((self.num_entities,), dtype=torch.int64)
-            node_id_to_batch[entity_set] = torch.arange(entity_set.shape[0])
-            ht_tensor_batch = node_id_to_batch[ht_tensor]
-            return ht_tensor, ht_tensor_batch, r_tensor, entity_set, entity_feat, node_id_to_batch, queries, labels
+            return ht_tensor, r_tensor, entity_set, entity_feat, node_id_to_batch_id, queries, labels
         return wikikg_collate_fn
 
 
@@ -206,28 +219,25 @@ class Wiki90MEvaluationDataset(Dataset):
     def sub_batch_loader(self, batch):
         pass
 
-    def get_eval_collate_fn(self, single_query_per_head=True, max_neighbors=10, read_memmap=False):
+    def get_eval_collate_fn(self, max_neighbors=10, read_memmap=False):
         def collate_fn(batch):
-            hrt_collate = self.ds.get_collate_fn(single_query_per_head=single_query_per_head, max_neighbors=max_neighbors,
-                                                 read_memmap=read_memmap, eval_mode=True)
-            subbatches = []
-            for i in range(self.t_candidate.shape[1]):
-                subbatch_ht = []
-                subbatch_r = []
-                for _h, _r, _t_candidates, _ in batch:
-                    subbatch_ht.append(np.array([_h, _t_candidates[i]]))
-                    subbatch_r.append(_r)
-                subbatch = hrt_collate(zip(subbatch_ht, subbatch_r))
-                subbatches.append(subbatch)
+            hrt_collate = self.ds.get_collate_fn(max_neighbors=max_neighbors, read_memmap=read_memmap)
 
-            t_correct_idx = None
-            if isinstance(self, Wiki90MValidationDataset):  # t_correct_index exists
-                t_correct_idx = []
-                for _, _, _, _t_correct_idx in batch:
-                    t_correct_idx.append(_t_correct_idx)
-                t_correct_idx = np.array(t_correct_idx)
+            batch_h = array("i")
+            batch_r = array("i")
+            batch_t_candidates = []
+            t_correct_idx = array("i")
+            for _h, _r, _t_candidates, _t_correct in batch:
+                batch_h.append(_h)
+                batch_r.append(_r)
+                batch_t_candidates.append(_t_candidates)
+                t_correct_idx.append(_t_correct)
 
-            return subbatches, t_correct_idx
+            out_batch = hrt_collate(list(zip(batch_h, batch_r, batch_t_candidates)))
+
+            t_correct_idx = t_correct_idx if isinstance(self, Wiki90MValidationDataset) else None
+
+            return out_batch, np.array(t_correct_idx)
 
         return collate_fn
 
