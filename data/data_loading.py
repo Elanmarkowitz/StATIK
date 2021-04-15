@@ -137,7 +137,7 @@ class WikiKG90MProcessedDataset(Dataset):
         is_query.extend(c_is_query)
         labels.append(c_label)
         batch_id_to_node_id.extend(c_batch_id_to_node_id)
-        node_id_to_batch_id[c_batch_id_to_node_id] = np.arange(0, c_batch_id_to_node_id.shape[0])
+        node_id_to_batch_id[c_batch_id_to_node_id] = np.arange(0, c_batch_id_to_node_id.shape[0]) + cumulative_entities
 
         return
 
