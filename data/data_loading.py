@@ -128,7 +128,7 @@ class WikiKG90MProcessedDataset(Dataset):
 
     @staticmethod
     def add_component(edge_heads, edge_relations, edge_tails, is_query, labels, cumulative_entities,
-                      batch_id_to_node_id, node_id_to_batch_id, component):
+                      batch_id_to_node_id, component):
         c_edge_heads, c_edge_relations, c_edge_tails, c_is_query, c_label, c_batch_id_to_node_id = component
 
         edge_heads.extend(c_edge_heads + cumulative_entities)
@@ -137,7 +137,6 @@ class WikiKG90MProcessedDataset(Dataset):
         is_query.extend(c_is_query)
         labels.append(c_label)
         batch_id_to_node_id.extend(c_batch_id_to_node_id)
-        node_id_to_batch_id[c_batch_id_to_node_id] = np.arange(0, c_batch_id_to_node_id.shape[0]) + cumulative_entities
 
         return
 
@@ -175,17 +174,16 @@ class WikiKG90MProcessedDataset(Dataset):
                     component, c_size = self.create_component(_h, rels_h_t, tails_h_t, _t, rels_t, tails_t, _r, _label)
 
                     self.add_component(edge_heads, edge_relations, edge_tails, is_query, labels, cumulative_entities,
-                                       batch_id_to_node_id, node_id_to_batch_id, component)
+                                       batch_id_to_node_id, component)
                     cumulative_entities += c_size
 
             ht_tensor = torch.from_numpy(np.stack([edge_heads, edge_tails]).transpose()).long()
             r_tensor = torch.from_numpy(np.array(edge_relations)).long()
             entity_set = torch.from_numpy(np.array(batch_id_to_node_id)).long()
             entity_feat = torch.from_numpy(self.entity_feat[batch_id_to_node_id]).float() if read_memmap else None
-            node_id_to_batch_id = torch.from_numpy(node_id_to_batch_id)
             queries = torch.from_numpy(np.array(is_query)).long()
             labels = torch.from_numpy(np.array(labels)).long()
-            return ht_tensor, r_tensor, entity_set, entity_feat, node_id_to_batch_id, queries, labels
+            return ht_tensor, r_tensor, entity_set, entity_feat, queries, labels
         return wikikg_collate_fn
 
 
