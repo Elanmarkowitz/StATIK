@@ -36,8 +36,8 @@ class MessagePassingLayer(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
         self.act = nn.LeakyReLU()
 
-    def aggregate_messages(self, ht: Tensor, messages_fwd: Tensor, messages_back: Tensor, p_selections: Tensor,
-                           nodes_in_batch: int):
+    def aggregate_messages(self, ht: Tensor, messages_fwd: Tensor, messages_back: Tensor, nodes_in_batch: int,
+                           p_selections: Tensor = None):
         """
         :param ht: shape m x 2
         :param messages_fwd: shape m x embed_dim
@@ -48,8 +48,9 @@ class MessagePassingLayer(nn.Module):
         """
         device = messages_fwd.device
         msg_dst = torch.cat([ht[:, 1], ht[:, 0]])
-        messages_fwd = messages_fwd * p_selections / p_selections.detach()
-        messages_back = messages_back * p_selections / p_selections.detach()
+        if p_selections is not None:
+            messages_fwd = messages_fwd * p_selections / p_selections.detach()
+            messages_back = messages_back * p_selections / p_selections.detach()
         messages = torch.cat([messages_fwd, messages_back], dim=0)
         agg_messages = torch.zeros((nodes_in_batch, self.embed_dim), dtype=messages_fwd.dtype, device=device)
         agg_messages = torch.scatter_add(agg_messages, 0, msg_dst.reshape(-1, 1).expand(-1, self.embed_dim), messages)
@@ -59,7 +60,7 @@ class MessagePassingLayer(nn.Module):
         agg_messages = agg_messages / num_msgs.reshape(-1, 1)  # take mean of messages
         return agg_messages
 
-    def forward(self, H: Tensor, E: Tensor, ht: Tensor, r_embed, p_selections: Tensor):
+    def forward(self, H: Tensor, E: Tensor, ht: Tensor, r_embed, p_selections: Tensor = None):
         """
         :param H: shape n x embed_dim
         :param E: shape m x embed_dim
@@ -68,10 +69,11 @@ class MessagePassingLayer(nn.Module):
         :param p_selections: shape m
         :return:
         """
-        p_selections = p_selections.reshape(-1, 1)
         messages_fwd = self.calc_messages_fwd(H, E, ht[:, 0], r_embed)
         messages_back = self.calc_messages_back(H, E, ht[:, 1], r_embed)
-        aggregated_messages = self.aggregate_messages(ht, messages_fwd, messages_back, p_selections, H.shape[0])
+        if p_selections is not None:
+            p_selections = p_selections.reshape(-1, 1)
+        aggregated_messages = self.aggregate_messages(ht, messages_fwd, messages_back, H.shape[0], p_selections)
         out = self.norm(self.act(aggregated_messages) + H)
         return out
 
@@ -155,6 +157,15 @@ class KGCompletionGNN(nn.Module):
 
     def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, relation_feat: Tensor, p_selections: Tensor,
                 queries: Tensor,) -> Tensor:
+        """
+        :param ht: m x 2
+        :param r_tensor: m
+        :param entity_feat: n x feat_dim
+        :param relation_feat: m x feat_dim
+        :param p_selections: m or None (optional)
+        :param queries: m
+        :return:
+        """
         r_embed = self.relation_embedding(r_tensor)
         H_0 = self.act(self.entity_input_transform(entity_feat))
         H_0 = self.norm_entity(H_0)

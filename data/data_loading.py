@@ -80,11 +80,15 @@ class WikiKG90MProcessedDataset(Dataset):
         return rels, tails, p_selection if sampler is not None else None
 
     @staticmethod
-    def ignore_query(rels, tails, ignore_r, ignore_t):
+    def ignore_query(rels, tails, ignore_r, ignore_t, p_select=None):
         non_ignored_idx = np.logical_or(tails != ignore_t, rels != ignore_r)
         rels = rels[non_ignored_idx]
         tails = tails[non_ignored_idx]
-        return rels, tails
+        if p_select is not None:
+            p_select_non_ignored = p_select[non_ignored_idx]
+        else:
+            p_select_non_ignored = None
+        return rels, tails, p_select_non_ignored
 
     def add_relations_with_inverting(self, node, rels, tails, entity_set: set, edge_heads: array, edge_tails: array,
                                      edge_relations: array):
@@ -104,7 +108,11 @@ class WikiKG90MProcessedDataset(Dataset):
         edge_tails.extend(np.repeat(node, count_backward))
         edge_relations.extend(rels[inverse_relation_idx] - self.num_relations)
 
-    def create_component(self, h, rels_h, tails_h, t, rels_t, tails_t, r, label, p_selection_h=None, p_selection_t=None):
+    @staticmethod
+    def renormalize_p(probs: torch.Tensor):
+        return probs / probs.sum()
+
+    def create_component(self, h, rels_h, tails_h, t, rels_t, tails_t, r, label, p_select_h=None, p_select_t=None):
         entity_set = set()
         edge_heads = array("i")
         edge_tails = array("i")
@@ -122,8 +130,10 @@ class WikiKG90MProcessedDataset(Dataset):
         is_query = np.zeros((len(edge_heads),), dtype=np.int64)
         is_query[-1] = 1
 
-        if p_selection_h is not None and p_selection_t is not None:
-            p_select = torch.cat([p_selection_h, p_selection_t, torch.ones((1,), device=p_selection_t.device)])
+        if p_select_h is not None and p_select_t is not None:
+            p_select_h = self.renormalize_p(p_select_h)
+            p_select_t = self.renormalize_p(p_select_t)
+            p_select = torch.cat([p_select_h, p_select_t, torch.ones((1,), device=p_select_t.device)])  # TODO: Should query edge weight be different?
         else:
             p_select = None
 
@@ -157,8 +167,6 @@ class WikiKG90MProcessedDataset(Dataset):
 
         def wikikg_collate_fn(batch):
             parameterized_sampling = head_sampler is not None
-            # query edge marked as query
-            # 1-hop connected entities included
             batch_id_to_node_id = array("i")
             edge_heads = array("i")
             edge_tails = array("i")
@@ -177,16 +185,17 @@ class WikiKG90MProcessedDataset(Dataset):
                 t_candidates = np.concatenate([_ts, _neg_ts])
                 sample_labels = np.concatenate([np.ones_like(_ts), np.zeros_like(_neg_ts)])
 
-                rels_h, tails_h, p_selection_h = self.sample_neighbors(_h, max_neighbors, query_r=_r, sampler=head_sampler)
+                rels_h, tails_h, p_select_h = self.sample_neighbors(_h, max_neighbors, query_r=_r, sampler=head_sampler)
 
                 for _t, _label in zip(t_candidates, sample_labels):
 
-                    rels_t, tails_t, p_selection_t = self.sample_neighbors(_t, max_neighbors, query_r=_r, sampler=tail_sampler)
+                    rels_t, tails_t, p_select_t = self.sample_neighbors(_t, max_neighbors, query_r=_r, sampler=tail_sampler)
 
-                    rels_h_t, tails_h_t = self.ignore_query(rels_h, tails_h, _r, _t)
-                    rels_t, tails_t = self.ignore_query(rels_t, tails_t, _r + self.num_relations, _h)
+                    rels_h_t, tails_h_t, p_select_h_t = self.ignore_query(rels_h, tails_h, _r, _t, p_select=p_select_h)
+                    rels_t, tails_t, p_select_t = self.ignore_query(rels_t, tails_t, _r + self.num_relations, _h, p_select=p_select_t)
 
-                    component, c_size = self.create_component(_h, rels_h_t, tails_h_t, _t, rels_t, tails_t, _r, _label)
+                    component, c_size = self.create_component(_h, rels_h_t, tails_h_t, _t, rels_t, tails_t, _r, _label,
+                                                              p_select_h_t, p_select_t)
 
                     self.add_component(edge_heads, edge_relations, edge_tails, is_query, labels, cumulative_entities,
                                        batch_id_to_node_id, p_selections, component)
