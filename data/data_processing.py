@@ -107,13 +107,10 @@ def load_processed_data(root_data_dir: str) -> WikiKG90MDataset:
     print('Loading processed dataset.')
     dataset = load_original_data(root_data_dir)
     dataset.degrees = np.load(os.path.join(save_dir, 'degrees.npy'))
-    dataset.train_ht_inverse = np.load(os.path.join(save_dir, 'train_ht_inverse.npy'))
-    dataset.train_r_inverse = np.load(os.path.join(save_dir, 'train_r_inverse.npy'))
-    dataset.train_ht_both = np.load(os.path.join(save_dir, 'train_ht_both.npy'))
-    dataset.train_r_both = np.load(os.path.join(save_dir, 'train_r_both.npy'))
+    # dataset.train_ht_inverse = np.load(os.path.join(save_dir, 'train_ht_inverse.npy'))
+    # dataset.train_r_inverse = np.load(os.path.join(save_dir, 'train_r_inverse.npy'))
     dataset.train_ht = dataset.train_hrt[:, [0,2]]
     dataset.train_r = dataset.train_hrt[:,1]
-    dataset.num_relations_both = dataset.num_relations * 2
     # print('Loading edge dict.')
     # with open(os.path.join(save_dir, 'edge_dict.pkl'), 'rb') as f:
     #     dataset.edge_dict = pickle.load(f)
