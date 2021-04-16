@@ -173,7 +173,7 @@ class WikiKG90MProcessedDataset(Dataset):
             ht_tensor = torch.from_numpy(np.stack([edge_heads, edge_tails]).transpose()).long()
             r_tensor = torch.from_numpy(np.array(edge_relations)).long()
             entity_set = torch.from_numpy(np.array(batch_id_to_node_id)).long()
-            entity_feat = torch.from_numpy(self.entity_feat[batch_id_to_node_id]).float() if read_memmap else None
+            entity_feat = None  # TODO: Remove this
             queries = torch.from_numpy(np.array(is_query)).long()
             labels = torch.from_numpy(np.array(labels)).long()
             return ht_tensor, r_tensor, entity_set, entity_feat, queries, labels
