@@ -15,7 +15,7 @@ class ParameterizedSampler(nn.Module):
         :param r_query: (int like)
         :param r_samples: np array indicating the relation type of edges (doubled to account for direction)
         :param num_samples: number of samples to take
-        :param topk: whether to sample top k scores or sample based on distribution
+        :param use_topk: whether to sample top k scores or sample based on distribution
         :param replacement: whether to sample with replacement when sampling using multinomial dist
         :return: selection array indicating sampled edges
         """
