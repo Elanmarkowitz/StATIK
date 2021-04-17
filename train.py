@@ -30,6 +30,7 @@ flags.DEFINE_integer("local_rank", 0, "How frequently to print learning statisti
 flags.DEFINE_integer("validate_every", 1024, "How many iterations to do between each single batch validation.")
 flags.DEFINE_integer("validation_batches", 1000, "Number of batches to do for each validation check.")
 flags.DEFINE_integer("valid_batch_size", 1, "Batch size for validation (does all t_candidates at once).")
+flags.DEFINE_bool("distributed", True, "Indicate whether to use distributed training.")
 
 DEBUGGING_MODEL = False
 
@@ -57,26 +58,16 @@ def move_batch_to_device(batch, device):
     return batch
 
 
-def train(global_rank, local_rank):
-    torch.cuda.set_device(local_rank)
-    dataset = load_dataset(FLAGS.root_data_dir)
-    sampler = DistributedSampler(dataset, rank=global_rank, shuffle=True)
-    train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size,
-                              num_workers=FLAGS.num_workers, sampler=sampler,
-                              collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, sample_negs=1))
-    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers)
-    model.to(local_rank)
-    ddp_model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
-    opt = optim.Adam(ddp_model.parameters(), lr=FLAGS.lr)
+def train_inner(model, train_loader, opt, dataset, device, print_output=True):
     moving_average_loss = torch.tensor(1.0)
     moving_average_acc = torch.tensor(0.5)
     moving_avg_rank = torch.tensor(10.0)
     for i, batch in enumerate(tqdm.tqdm(train_loader)):
-        ddp_model.train()
+        model.train()
         batch = prepare_batch_for_model(batch, dataset)
-        batch = move_batch_to_device(batch, local_rank)
+        batch = move_batch_to_device(batch, device)
         ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels = batch
-        preds = ddp_model(ht_tensor, r_tensor, entity_feat, relation_feat, queries)
+        preds = model(ht_tensor, r_tensor, entity_feat, relation_feat, queries)
         loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
 
         correct = torch.eq((preds > 0).long().flatten(), labels)
@@ -89,19 +80,44 @@ def train(global_rank, local_rank):
         moving_average_loss = .999 * moving_average_loss + 0.001 * loss.detach().cpu()
         moving_average_acc = .99 * moving_average_acc + 0.01 * training_acc.detach().cpu()
 
-        if (i + 1) % FLAGS.print_freq == 0 and global_rank == 0:
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+        if (i + 1) % FLAGS.print_freq == 0 and print_output:
             print(f"loss={loss.detach().cpu().numpy():.5f}, avg={moving_average_loss.numpy():.5f}, "
                   f"train_acc={training_acc.detach().cpu().numpy():.3f}, avg={moving_average_acc.numpy():.3f}, "
                   f"rank={rank} "
                   f"avg_rank={moving_avg_rank}")
 
-        if (i + 1) % FLAGS.validate_every == 0 and global_rank == 0:
-            ddp_model.eval()
-            validate(dataset, ddp_model.module, num_batches=FLAGS.validation_batches)
+        if (i + 1) % FLAGS.validate_every == 0 and print_output:
+            model.eval()
+            module = model.module if FLAGS.distributed else model
+            validate(dataset, module, num_batches=FLAGS.validation_batches)
 
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
+
+def train_single(device):
+    dataset = load_dataset(FLAGS.root_data_dir)
+    train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size, num_workers=FLAGS.num_workers,
+                              collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, sample_negs=1))
+    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers)
+    model.to(device)
+    opt = optim.Adam(model.parameters(), lr=FLAGS.lr)
+    train_inner(model, train_loader, opt, dataset, device)
+
+
+def train_distributed(global_rank, local_rank):
+    torch.cuda.set_device(local_rank)
+    dataset = load_dataset(FLAGS.root_data_dir)
+    sampler = DistributedSampler(dataset, rank=global_rank, shuffle=True)
+    train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size, num_workers=FLAGS.num_workers, sampler=sampler,
+                              collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, sample_negs=1))
+    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers)
+    model.to(local_rank)
+    if FLAGS.distributed:
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+    opt = optim.Adam(model.parameters(), lr=FLAGS.lr)
+    train_inner(model, train_loader, opt, dataset, local_rank, print_output=(global_rank==0))
 
 
 # Validating only on global rank 0 for now
@@ -138,16 +154,19 @@ def test(dataset):
 
 
 def main(argv):
-    grank = int(os.environ['RANK'])
-    ws = int(os.environ['WORLD_SIZE'])
-    master_addr = os.environ['MASTER_ADDR']
-    master_port = os.environ['MASTER_PORT']
-    dist.init_process_group(backend=dist.Backend.NCCL,
-                            init_method="tcp://{}:{}".format(master_addr, master_port), rank=grank, world_size=ws)
+    if FLAGS.distributed:
+        grank = int(os.environ['RANK'])
+        ws = int(os.environ['WORLD_SIZE'])
+        master_addr = os.environ['MASTER_ADDR']
+        master_port = os.environ['MASTER_PORT']
+        dist.init_process_group(backend=dist.Backend.NCCL,
+                                init_method="tcp://{}:{}".format(master_addr, master_port), rank=grank, world_size=ws)
 
-    setproctitle.setproctitle("KGCompletionTrainer:{}".format(grank))
-    train(grank, FLAGS.local_rank)
-    dist.destroy_process_group()
+        setproctitle.setproctitle("KGCompletionTrainer:{}".format(grank))
+        train_distributed(grank, FLAGS.local_rank)
+        dist.destroy_process_group()
+    else:
+        train_single(FLAGS.device)
 
 
 if __name__ == "__main__":
