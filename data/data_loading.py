@@ -11,7 +11,7 @@ from data.left_contiguous_csr import LeftContiguousCSR
 class WikiKG90MProcessedDataset(Dataset):
     """WikiKG90M processed dataset."""
 
-    def __init__(self, root_data_dir: str = None, include_inverse: bool = True, from_dataset: WikiKG90MDataset = None):
+    def __init__(self, root_data_dir: str = None, from_dataset: WikiKG90MDataset = None):
         """
         Args:
             root_data_dir (str): Root data dir containing the processed WikiKG90M dataset.
@@ -27,15 +27,8 @@ class WikiKG90MProcessedDataset(Dataset):
         self.train_r = dataset.train_r
         self.num_training_relations = dataset.num_relations
         self.num_relations = dataset.num_relations
-        if include_inverse:
-            self.includes_inverse = True
-            self.num_relations_both = dataset.num_relations_both
-            self.train_ht_both = dataset.train_ht_both # ht pairs for training
-            self.train_r_both = dataset.train_r_both # corresponding relation
-        else:
-            self.includes_inverse = False
         self.entity_feat = dataset.entity_feat  # feature matrix for entities
-        self.relation_feat = dataset.relation_feat  # feature matrix for relation types
+        self.relation_feat = dataset.relation_feat  # feature matrix for relation types   # unused in loader
         self.edge_lccsr: LeftContiguousCSR = dataset.edge_lccsr
         self.relation_lccsr: LeftContiguousCSR = dataset.relation_lccsr
         self.degrees = dataset.degrees
@@ -161,7 +154,7 @@ class WikiKG90MProcessedDataset(Dataset):
 
         return
 
-    def get_collate_fn(self, max_neighbors: int = 10, read_memmap: bool = False, sample_negs: int = 0,
+    def get_collate_fn(self, max_neighbors: int = 10, sample_negs: int = 0,
                        head_sampler: torch.nn.Module = None, tail_sampler: torch.nn.Module = None):
         assert (head_sampler is None and tail_sampler is None) or (head_sampler is not None and tail_sampler is not None), "Requires both head_sampler and tail_sampler if given."
 
@@ -205,7 +198,7 @@ class WikiKG90MProcessedDataset(Dataset):
             ht_tensor = torch.from_numpy(np.stack([edge_heads, edge_tails]).transpose()).long()
             r_tensor = torch.from_numpy(np.array(edge_relations)).long()
             entity_set = torch.from_numpy(np.array(batch_id_to_node_id)).long()
-            entity_feat = torch.from_numpy(self.entity_feat[batch_id_to_node_id]).float() if read_memmap else None
+            entity_feat = None  # TODO: Remove this
             queries = torch.from_numpy(np.array(is_query)).long()
             labels = torch.from_numpy(np.array(labels)).long()
             p_selections = torch.cat(p_selections) if parameterized_sampling else None
@@ -243,13 +236,11 @@ class Wiki90MEvaluationDataset(Dataset):
     def sub_batch_loader(self, batch):
         pass
 
-    def get_eval_collate_fn(self, max_neighbors=10, read_memmap=False,
-                            head_sampler: torch.nn.Module = None, tail_sampler: torch.nn.Module = None):
+    def get_eval_collate_fn(self, max_neighbors=10, head_sampler: torch.nn.Module = None, tail_sampler: torch.nn.Module = None):
         assert (head_sampler is None and tail_sampler is None) or (head_sampler is not None and tail_sampler is not None), "Requires both head_sampler and tail_sampler if given."
 
         def collate_fn(batch):
-            hrt_collate = self.ds.get_collate_fn(max_neighbors=max_neighbors, read_memmap=read_memmap,
-                                                 head_sampler=head_sampler, tail_sampler=tail_sampler)
+            hrt_collate = self.ds.get_collate_fn(max_neighbors=max_neighbors, head_sampler=head_sampler, tail_sampler=tail_sampler)
 
             batch_h = array("i")
             batch_r = array("i")
