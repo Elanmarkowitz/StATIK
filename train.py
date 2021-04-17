@@ -69,7 +69,7 @@ def train(global_rank, local_rank):
 
     valid_dataset = Wiki90MValidationDataset(dataset)
     valid_sampler = DistributedSampler(valid_dataset, rank=global_rank, shuffle=True)
-    valid_dataloader = DataLoader(valid_dataset, batch_size=FLAGS.batch_size, num_workers=0, sampler=valid_sampler,
+    valid_dataloader = DataLoader(valid_dataset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers, sampler=valid_sampler, drop_last=True,
                                   collate_fn=valid_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
 
     model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers)
@@ -118,14 +118,15 @@ def train(global_rank, local_rank):
             moving_average_acc = torch.tensor(0.5, device=local_rank)
             moving_avg_rank = torch.tensor(10.0, device=local_rank)
 
-        if (i + 1) % FLAGS.validate_every == 0 and global_rank == 0:
+        if (i + 1) % FLAGS.validate_every == 0:
             ddp_model.eval()
-            result = validate(valid_dataset, valid_dataloader, ddp_model.module, num_batches=FLAGS.validation_batches)
-            mrr = result['mrr']
-            if mrr > max_mrr:
-                max_mrr = mrr
+            result = validate(valid_dataset, valid_dataloader, ddp_model, global_rank, local_rank, num_batches=FLAGS.validation_batches)
+            if global_rank == 0:
+                mrr = result['mrr']
+                if mrr > max_mrr:
+                    max_mrr = mrr
 
-            print('Current MRR = {}, Best MRR = {}'.format(mrr, max_mrr))
+                print('Current MRR = {}, Best MRR = {}'.format(mrr, max_mrr))
 
         opt.zero_grad()
         loss.backward()
@@ -133,33 +134,43 @@ def train(global_rank, local_rank):
 
 
 # Validating only on global rank 0 for now
-def validate(valid_dataset: Dataset, valid_dataloader: DataLoader, model: KGCompletionGNN, num_batches: int = None):
+def validate(valid_dataset: Dataset, valid_dataloader: DataLoader, model, global_rank: int, local_rank: int, num_batches: int = None):
     evaluator = WikiKG90MEvaluator()
 
     top_10s = []
     t_corrects = []
     with torch.no_grad():
-        for i, (batch, t_correct_index) in enumerate(valid_dataloader):
+        for i, (batch, t_correct_index) in enumerate(tqdm(valid_dataloader)):
             batch = prepare_batch_for_model(batch, valid_dataset.ds)
-            batch = move_batch_to_device(batch, 0)  # TODO: This probably needs to be changed for DDP
+            batch = move_batch_to_device(batch, local_rank)
             ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, _ = batch
             preds = model(ht_tensor, r_tensor, entity_feat, relation_feat, queries)
-            preds = preds.reshape(VALID_BATCH_SIZE, 1001)
+            preds = preds.reshape(FLAGS.valid_batch_size, 1001)
             t_pred_top10 = preds.topk(10).indices
-            t_pred_top10 = t_pred_top10.detach().cpu().numpy()
+            t_pred_top10 = t_pred_top10.detach()
+            t_correct_index = torch.tensor(t_correct_index, device=local_rank)
             top_10s.append(t_pred_top10)
             t_corrects.append(t_correct_index)
             if num_batches and num_batches == (i + 1):
                 break
-    t_pred_top10 = np.concatenate(top_10s, axis=0)
-    t_correct_index = np.concatenate(t_corrects, axis=0)
-    input_dict = {'h,r->t': {'t_pred_top10': t_pred_top10, 't_correct_index': t_correct_index}}
-    result_dict = evaluator.eval(input_dict)
-    return result_dict
+
+    t_pred_top10 = torch.cat(top_10s, dim=0)
+    t_correct_index = torch.cat(t_corrects, dim=0)
+    aggregated_top10_preds, aggregated_correct_indices = gather_results(t_pred_top10, t_correct_index, global_rank)
+    if global_rank == 0:
+        input_dict = {'h,r->t': {'t_pred_top10': aggregated_top10_preds.cpu().numpy(), 't_correct_index': aggregated_correct_indices.cpu().numpy()}}
+        result_dict = evaluator.eval(input_dict)
+        return result_dict
+    else:
+        return None
 
 
-def test(dataset):
-    pass
+def gather_results(t_pred_top10: torch.Tensor, t_correct_index: torch.Tensor, global_rank):
+    gather_list_pred = [torch.empty(t_pred_top10.shape, dtype=t_pred_top10.dtype, device=global_rank) for _ in range(dist.get_world_size())]
+    gather_list_correct = [torch.empty(t_correct_index.shape, dtype=t_correct_index.dtype, device=global_rank) for _ in range(dist.get_world_size())]
+    dist.all_gather(gather_list_pred, t_pred_top10)
+    dist.all_gather(gather_list_correct, t_correct_index)
+    return torch.cat(gather_list_pred, dim=0), torch.cat(gather_list_correct, dim=0)
 
 
 def main(argv):
