@@ -1,10 +1,7 @@
-# Branch Keshav
-
 from array import array
 from ogb.lsc import WikiKG90MDataset
 import torch
 from torch.utils.data import Dataset
-import random
 import numpy as np 
 
 from data import data_processing
