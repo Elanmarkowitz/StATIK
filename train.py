@@ -36,18 +36,18 @@ DEBUGGING_MODEL = False
 
 
 def prepare_batch_for_model(batch, dataset: WikiKG90MProcessedDataset, save_batch=False):
-    ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives = batch
+    ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
     if entity_feat is None:
         entity_feat = torch.from_numpy(dataset.entity_feat[entity_set]).float()
     relation_feat = torch.tensor(dataset.relation_feat).float()
-    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives
+    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
     if save_batch:
         pickle.dump(batch, open('sample_batch.pkl', 'wb'))
     return batch
 
 
 def move_batch_to_device(batch, device):
-    ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives = batch
+    ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
     ht_tensor = ht_tensor.to(device)
     r_tensor = r_tensor.to(device)
     entity_feat = entity_feat.to(device)
@@ -56,7 +56,8 @@ def move_batch_to_device(batch, device):
     labels = labels.to(device)
     r_queries = r_queries.to(device)
     r_relatives = r_relatives.to(device)
-    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives
+    h_or_t_sample = h_or_t_sample.to(device)
+    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
     return batch
 
 
@@ -68,7 +69,7 @@ def train_inner(model, train_loader, opt, dataset, device, print_output=True):
         model.train()
         batch = prepare_batch_for_model(batch, dataset)
         batch = move_batch_to_device(batch, device)
-        ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives = batch
+        ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
         preds = model(ht_tensor, r_tensor, entity_feat, relation_feat, queries)
         loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
 
@@ -135,7 +136,7 @@ def validate(dataset: WikiKG90MProcessedDataset, model: torch.nn.Module, num_bat
         for i, (batch, t_correct_index) in enumerate(valid_dataloader):
             batch = prepare_batch_for_model(batch, valid_dataset.ds)
             batch = move_batch_to_device(batch, 0)  # TODO: This probably needs to be changed for DDP
-            ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, _ = batch
+            ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, _, r_queries, r_relatives, h_or_t_sample = batch
             preds = model(ht_tensor, r_tensor, entity_feat, relation_feat, queries)
             preds = preds.reshape(VALID_BATCH_SIZE, 1001)
             t_pred_top10 = preds.topk(10).indices

@@ -103,6 +103,7 @@ class WikiKG90MProcessedDataset(Dataset):
 
         r_relative = np.concatenate([fwd_rel_idx_h, fwd_rel_idx_t, np.array([1])])
         r_query = np.repeat(r, r_relative.shape[0])
+        from_head_or_tail = np.concatenate([np.ones(rels_h.shape[0], dtype=np.int32), np.zeros(rels_t.shape[0], dtype=np.int32), np.array([1])])
 
         entity_set.add(h)
         entity_set.add(t)
@@ -119,12 +120,12 @@ class WikiKG90MProcessedDataset(Dataset):
         edge_heads = np.array([node_id_to_batch_node_id[e] for e in edge_heads])
         edge_tails = np.array([node_id_to_batch_node_id[e] for e in edge_tails])
 
-        return (edge_heads, edge_relations, edge_tails, is_query, label, batch_id_to_node_id, r_query, r_relative), len(entity_set)
+        return (edge_heads, edge_relations, edge_tails, is_query, label, batch_id_to_node_id, r_query, r_relative, from_head_or_tail), len(entity_set)
 
     @staticmethod
     def add_component(edge_heads, edge_relations, edge_tails, is_query, labels, cumulative_entities,
-                      batch_id_to_node_id, r_queries, r_relatives, component):
-        c_edge_heads, c_edge_relations, c_edge_tails, c_is_query, c_label, c_batch_id_to_node_id, r_query, r_relative = component
+                      batch_id_to_node_id, r_queries, r_relatives, head_or_tail_sample, component):
+        c_edge_heads, c_edge_relations, c_edge_tails, c_is_query, c_label, c_batch_id_to_node_id, r_query, r_relative, from_head_or_tail = component
 
         edge_heads.extend(c_edge_heads + cumulative_entities)
         edge_tails.extend(c_edge_tails + cumulative_entities)
@@ -134,6 +135,7 @@ class WikiKG90MProcessedDataset(Dataset):
         batch_id_to_node_id.extend(c_batch_id_to_node_id)
         r_queries.extend(r_query)
         r_relatives.extend(r_relative)
+        head_or_tail_sample.extend(from_head_or_tail)
 
         return
 
@@ -150,6 +152,7 @@ class WikiKG90MProcessedDataset(Dataset):
             labels = array("i")
             r_queries = array("i")
             r_relatives = array("i")
+            h_or_t_sample = array("i")
             cumulative_entities = 0
 
             if sample_negs:
@@ -173,7 +176,7 @@ class WikiKG90MProcessedDataset(Dataset):
                     component, c_size = self.create_component(_h, rels_h_t, tails_h_t, _t, rels_t, tails_t, _r, _label)
 
                     self.add_component(edge_heads, edge_relations, edge_tails, is_query, labels, cumulative_entities,
-                                       batch_id_to_node_id, r_queries, r_relatives, component)
+                                       batch_id_to_node_id, r_queries, r_relatives, h_or_t_sample, component)
                     cumulative_entities += c_size
 
             ht_tensor = torch.from_numpy(np.stack([edge_heads, edge_tails]).transpose()).long()
@@ -184,7 +187,8 @@ class WikiKG90MProcessedDataset(Dataset):
             labels = torch.from_numpy(np.array(labels)).long()
             r_queries = torch.from_numpy(np.array(r_queries)).long()
             r_relatives = torch.from_numpy(np.array(r_relatives)).long()
-            return ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives
+            h_or_t_sample = torch.from_numpy(np.array(h_or_t_sample)).long()
+            return ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
         return wikikg_collate_fn
 
 
