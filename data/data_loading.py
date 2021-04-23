@@ -90,17 +90,19 @@ class WikiKG90MProcessedDataset(Dataset):
         edge_tails.extend(np.repeat(node, count_backward))
         edge_relations.extend(rels[inverse_relation_idx] - self.num_relations)
 
+        return forward_relation_idx
+
     def create_component(self, h, rels_h, tails_h, t, rels_t, tails_t, r, label):
         entity_set = set()
         edge_heads = array("i")
         edge_tails = array("i")
         edge_relations = array("i")
 
-        r_relative = np.concatenate([rels_h, rels_t, np.array([r])])
-        r_query = np.repeat(r, r_relative.shape[0])
+        fwd_rel_idx_h = self.add_relations_with_inverting(h, rels_h, tails_h, entity_set, edge_heads, edge_tails, edge_relations)
+        fwd_rel_idx_t = self.add_relations_with_inverting(t, rels_t, tails_t, entity_set, edge_heads, edge_tails, edge_relations)
 
-        self.add_relations_with_inverting(h, rels_h, tails_h, entity_set, edge_heads, edge_tails, edge_relations)
-        self.add_relations_with_inverting(t, rels_t, tails_t, entity_set, edge_heads, edge_tails, edge_relations)
+        r_relative = np.concatenate([fwd_rel_idx_h, fwd_rel_idx_t, np.array([1])])
+        r_query = np.repeat(r, r_relative.shape[0])
 
         entity_set.add(h)
         entity_set.add(t)
