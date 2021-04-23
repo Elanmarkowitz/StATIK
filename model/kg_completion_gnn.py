@@ -1,6 +1,7 @@
 # Branch keshav
 
 import torch
+import math
 from torch import nn
 from torch import Tensor
 
@@ -8,12 +9,11 @@ import pdb
 
 
 class MessageCalculationLayer(nn.Module):
-    def __init__(self, embed_dim: int, edge_attention=False):
+    def __init__(self, embed_dim: int, message_weighting_function=None):
         super(MessageCalculationLayer, self).__init__()
         self.embed_dim = embed_dim
         self.transform_message = nn.Linear(4 * embed_dim, embed_dim)
-        self.message_weighting_function = MessageWeightingFunction(embed_dim, embed_dim // 2)
-        self.edge_attention = edge_attention
+        self.message_weighting_function = message_weighting_function
 
     def forward(self, H: Tensor, E: Tensor, heads: Tensor, r_embed: Tensor, queries: Tensor):
         """
@@ -27,10 +27,10 @@ class MessageCalculationLayer(nn.Module):
         H_heads = H[heads]
         raw_messages = torch.cat([H_heads, E, H_heads * r_embed, E * r_embed], dim=1)
         messages = self.transform_message(raw_messages)
-        message_weights = self.message_weighting_function(E, queries) if self.edge_attention else None
+        message_weights = self.message_weighting_function(E, queries) if self.message_weighting_function is not None else None
 
         # TODO: Maybe normalize
-        return message_weights * messages if self.edge_attention else messages
+        return message_weights.view(-1, 1) * messages if self.message_weighting_function is not None else messages
 
 
 class MessageWeightingFunction(nn.Module):
@@ -42,30 +42,36 @@ class MessageWeightingFunction(nn.Module):
         self.K = nn.Linear(relation_embed_dim, attention_dim, bias=False)
         self.softmax = nn.Softmax(dim=0)
 
-    # Computes the attention scores between the relation embeddings of all sampled edges with the relation type of the query
-    def compute_attention_scores(self, Q: Tensor, K: Tensor):
-        attention_scores = torch.matmul(Q, K.T)
-        return self.softmax(attention_scores)
-
     def forward(self, relation_embeds: Tensor, queries: Tensor):
-        attention_scores = []
-        batch_separation_points = [0] + (queries.nonzero(as_tuple=False).flatten() + 1).tolist()
-        for i in range(1, len(batch_separation_points)):
-            batch_slice = relation_embeds[batch_separation_points[i - 1]: batch_separation_points[i], :]
-            Q = self.Q(batch_slice[-1, :])  # Transformed Q of the query relation
-            K = self.K(batch_slice)  # Transformed Ks of all the sampled edges + query edge
-            batch_attention_scores = self.compute_attention_scores(Q, K)
-            attention_scores.append(batch_attention_scores)
+        query_idxs = queries.nonzero(as_tuple=False).flatten()
+        value_idxs = torch.roll(queries, shifts=1)
+        value_idxs[0] = 0
+        X_attn_idxs = torch.cumsum(value_idxs, dim=0)
+        Y_attn_idxs = torch.arange(relation_embeds.shape[0])
 
-        return torch.cat(attention_scores)
+        Q = self.Q(relation_embeds)
+        K = self.K(relation_embeds)
+        Q_query = Q[query_idxs]
+        attn_matrix = torch.matmul(K, Q_query.T) / math.sqrt(self.attention_dim)
+
+        negative_y, negative_x = torch.where(attn_matrix < 0)
+        mask = torch.full(attn_matrix.shape, -1e+30, device=attn_matrix.device)
+        mask[negative_y, negative_x] = 1e+30
+        mask[Y_attn_idxs, X_attn_idxs] = 1
+
+        attn_scores = attn_matrix * mask.detach()
+        attn_scores = self.softmax(attn_scores)
+        attn_scores = attn_scores[Y_attn_idxs, X_attn_idxs]
+
+        return attn_scores
 
 
 class MessagePassingLayer(nn.Module):
-    def __init__(self, embed_dim: int, edge_attention=False):
+    def __init__(self, embed_dim: int, message_weighting_function=None):
         super(MessagePassingLayer, self).__init__()
         self.embed_dim = embed_dim
-        self.calc_messages_fwd = MessageCalculationLayer(embed_dim, edge_attention)
-        self.calc_messages_back = MessageCalculationLayer(embed_dim, edge_attention)
+        self.calc_messages_fwd = MessageCalculationLayer(embed_dim, message_weighting_function)
+        self.calc_messages_back = MessageCalculationLayer(embed_dim, message_weighting_function)
         self.norm = nn.LayerNorm(embed_dim)
         self.act = nn.LeakyReLU()
 
@@ -161,6 +167,8 @@ class KGCompletionGNN(nn.Module):
         self.relation_embedding = nn.Embedding(num_relations, embed_dim)
         self.edge_input_transform = nn.Linear(input_dim + 1, embed_dim)
         self.entity_input_transform = nn.Linear(input_dim, embed_dim)
+        #self.entity_influence_table = nn.Parameter(torch.ones(num_relations, num_relations), requires_grad=True)
+        self.message_weighting_function = MessageWeightingFunction(embed_dim, embed_dim // 2) if edge_attention else None
         self.norm_entity = nn.LayerNorm(embed_dim)
         self.norm_edge = nn.LayerNorm(embed_dim)
 
@@ -168,7 +176,7 @@ class KGCompletionGNN(nn.Module):
         self.edge_update_layers = nn.ModuleList()
 
         for i in range(num_layers):
-            self.message_passing_layers.append(MessagePassingLayer(embed_dim, edge_attention=edge_attention))
+            self.message_passing_layers.append(MessagePassingLayer(embed_dim, message_weighting_function=self.message_weighting_function))
             self.edge_update_layers.append(EdgeUpdateLayer(embed_dim))
 
         self.classify_triple = TripleClassificationLayer(embed_dim)
