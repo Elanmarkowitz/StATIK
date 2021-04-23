@@ -66,6 +66,10 @@ def move_batch_to_device(batch, device):
 
 def train(global_rank, local_rank):
     torch.cuda.set_device(local_rank)
+    torch.manual_seed(0)
+    random.seed(0)
+    np.random.seed(0)
+
     dataset = load_dataset(FLAGS.root_data_dir)
     train_sampler = DistributedSampler(dataset, rank=global_rank, shuffle=True)
     train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size,
@@ -130,6 +134,7 @@ def train(global_rank, local_rank):
                     mrr = result['mrr']
                     if mrr > max_mrr:
                         max_mrr = mrr
+                        torch.save(ddp_model.module.state_dict(), 'best_model_attn.pt')
 
                     print('Current MRR = {}, Best MRR = {}'.format(mrr, max_mrr))
 
