@@ -1,3 +1,4 @@
+import math
 import random
 
 from absl import app, flags
@@ -31,7 +32,8 @@ flags.DEFINE_string("device", "cuda", "Device to use (cuda/cpu).")
 flags.DEFINE_integer("print_freq", 1024, "How frequently to print learning statistics in number of iterations")
 flags.DEFINE_integer("local_rank", 0, "How frequently to print learning statistics in number of iterations")
 flags.DEFINE_integer("validate_every", 1024, "How many iterations to do between each single batch validation.")
-flags.DEFINE_bool("edge_attention", False, "Whether or not to attend to ")
+flags.DEFINE_bool("edge_attention", False, "Whether or not to attend to edges during ")
+flags.DEFINE_bool("relation_scoring", False, "Whether or not to learn pairwise relation importance")
 flags.DEFINE_integer("validation_batches", 1000, "Number of batches to do for each validation check.")
 flags.DEFINE_integer("valid_batch_size", 1, "Batch size for validation (does all t_candidates at once).")
 flags.DEFINE_integer("epochs", 1, "Num epochs to train for")
@@ -72,13 +74,16 @@ def train(global_rank, local_rank):
 
     valid_dataset = Wiki90MValidationDataset(dataset)
     valid_sampler = DistributedSampler(valid_dataset, rank=global_rank, shuffle=True)
-    valid_dataloader = DataLoader(valid_dataset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers, sampler=valid_sampler, drop_last=True,
-                                  collate_fn=valid_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
+    valid_dataloader = DataLoader(valid_dataset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers, sampler=valid_sampler,
+                                  drop_last=True, collate_fn=valid_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
 
-    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, edge_attention=FLAGS.edge_attention)
+    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, edge_attention=FLAGS.edge_attention,
+                            relation_scoring=FLAGS.relation_scoring)
     model.to(local_rank)
     ddp_model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     opt = optim.Adam(ddp_model.parameters(), lr=FLAGS.lr)
+    scheduler = optim.lr_scheduler.MultiStepLR(opt, milestones=[math.floor(len(train_loader)/2), len(train_loader)], gamma=0.5)
+
     moving_average_loss = torch.tensor(1.0, device=local_rank)
     moving_average_acc = torch.tensor(0.5, device=local_rank)
     moving_avg_rank = torch.tensor(10.0, device=local_rank)
@@ -131,6 +136,7 @@ def train(global_rank, local_rank):
             opt.zero_grad()
             loss.backward()
             opt.step()
+            scheduler.step()
 
 
 # Validating only on global rank 0 for now
@@ -182,6 +188,10 @@ def main(argv):
                             init_method="tcp://{}:{}".format(master_addr, master_port), rank=grank, world_size=ws)
 
     setproctitle.setproctitle("KGCompletionTrainer:{}".format(grank))
+
+    if FLAGS.edge_attention and FLAGS.relation_scoring:
+        raise Exception("Only one of relation scoring or edge attention can be enabled!")
+
     train(grank, FLAGS.local_rank)
     dist.destroy_process_group()
 
