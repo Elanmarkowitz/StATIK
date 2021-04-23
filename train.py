@@ -16,6 +16,8 @@ from torch.utils.data import DataLoader, DistributedSampler
 from data.data_loading import load_dataset, WikiKG90MProcessedDataset, Wiki90MValidationDataset
 from model.kg_completion_gnn import KGCompletionGNN
 
+#from utils.profile import profile
+
 FLAGS = flags.FLAGS
 flags.DEFINE_string("root_data_dir", "/nas/home/elanmark/data", "Root data dir for installing the ogb dataset")
 flags.DEFINE_integer("batch_size", 100, "Batch size. Number of triples.")
@@ -60,7 +62,7 @@ def move_batch_to_device(batch, device):
     batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, p_selections
     return batch
 
-
+#@profile
 def train_inner(model, train_loader, opt, dataset, device, print_output=True):
     moving_average_loss = torch.tensor(1.0)
     moving_average_acc = torch.tensor(0.5)
@@ -101,10 +103,18 @@ def train_inner(model, train_loader, opt, dataset, device, print_output=True):
 
 def train_single(device):
     dataset = load_dataset(FLAGS.root_data_dir)
-    train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size, num_workers=FLAGS.num_workers,
-                              collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, sample_negs=1))
-    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers)
+    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers,
+                            parameterized_sampling=FLAGS.parameterized_sampling)
     model.to(device)
+    if FLAGS.parameterized_sampling:
+        model.head_sampler.to("cpu")
+        model.tail_sampler.to("cpu")
+    train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size, num_workers=FLAGS.num_workers,
+                              collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node,
+                                                                sample_negs=1,
+                                                                head_sampler=model.head_sampler,
+                                                                tail_sampler=model.tail_sampler))
+
     opt = optim.Adam(model.parameters(), lr=FLAGS.lr)
     train_inner(model, train_loader, opt, dataset, device)
 
@@ -113,10 +123,15 @@ def train_distributed(global_rank, local_rank):
     torch.cuda.set_device(local_rank)
     dataset = load_dataset(FLAGS.root_data_dir)
     sampler = DistributedSampler(dataset, rank=global_rank, shuffle=True)
-    train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size, num_workers=FLAGS.num_workers, sampler=sampler,
-                              collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, sample_negs=1))
-    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers)
+    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers,
+                            parameterized_sampling=FLAGS.parameterized_sampling)
     model.to(local_rank)
+    train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size, num_workers=FLAGS.num_workers, sampler=sampler,
+                              collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node,
+                                                                sample_negs=1,
+                                                                head_sampler=model.head_sampler,
+                                                                tail_sampler=model.tail_sampler))
+
     if FLAGS.distributed:
         model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     opt = optim.Adam(model.parameters(), lr=FLAGS.lr)

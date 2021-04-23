@@ -7,6 +7,7 @@ import numpy as np
 from data import data_processing
 from data.left_contiguous_csr import LeftContiguousCSR
 
+#from utils.profile import profile
 
 class WikiKG90MProcessedDataset(Dataset):
     """WikiKG90M processed dataset."""
@@ -55,6 +56,7 @@ class WikiKG90MProcessedDataset(Dataset):
 
         return batch_ht[0], batch_r, np.array([batch_ht[1]])
 
+    #@profile
     def sample_neighbors(self, node, max_neighbors: int, query_r: int = None, sampler: torch.nn.Module = None):
         assert query_r is not None if sampler is not None else True
         tails = self.edge_lccsr[node]
@@ -73,16 +75,18 @@ class WikiKG90MProcessedDataset(Dataset):
         return rels, tails, p_selection if sampler is not None else None
 
     @staticmethod
+    #@profile
     def ignore_query(rels, tails, ignore_r, ignore_t, p_select=None):
         non_ignored_idx = np.logical_or(tails != ignore_t, rels != ignore_r)
         rels = rels[non_ignored_idx]
         tails = tails[non_ignored_idx]
         if p_select is not None:
-            p_select_non_ignored = p_select[non_ignored_idx]
+            p_select_non_ignored = p_select[non_ignored_idx] # 102 e-6
         else:
             p_select_non_ignored = None
         return rels, tails, p_select_non_ignored
 
+    #@profile
     def add_relations_with_inverting(self, node, rels, tails, entity_set: set, edge_heads: array, edge_tails: array,
                                      edge_relations: array):
         inverse_relation_idx = rels >= self.num_relations
@@ -102,9 +106,11 @@ class WikiKG90MProcessedDataset(Dataset):
         edge_relations.extend(rels[inverse_relation_idx] - self.num_relations)
 
     @staticmethod
+    #@profile
     def renormalize_p(probs: torch.Tensor):
         return probs / probs.sum()
 
+    #@profile
     def create_component(self, h, rels_h, tails_h, t, rels_t, tails_t, r, label, p_select_h=None, p_select_t=None):
         entity_set = set()
         edge_heads = array("i")
@@ -124,8 +130,8 @@ class WikiKG90MProcessedDataset(Dataset):
         is_query[-1] = 1
 
         if p_select_h is not None and p_select_t is not None:
-            p_select_h = self.renormalize_p(p_select_h)
-            p_select_t = self.renormalize_p(p_select_t)
+            # p_select_h = self.renormalize_p(p_select_h)
+            # p_select_t = self.renormalize_p(p_select_t)
             p_select = torch.cat([p_select_h, p_select_t, torch.ones((1,), device=p_select_t.device)])  # TODO: Should query edge weight be different?
         else:
             p_select = None
@@ -133,12 +139,13 @@ class WikiKG90MProcessedDataset(Dataset):
         entity_set_list = list(entity_set)
         batch_id_to_node_id = np.array(entity_set_list)
         node_id_to_batch_node_id = dict((e, i) for (i, e) in enumerate(entity_set_list))
-        edge_heads = np.array([node_id_to_batch_node_id[e] for e in edge_heads])
-        edge_tails = np.array([node_id_to_batch_node_id[e] for e in edge_tails])
+        edge_heads = np.array(list(node_id_to_batch_node_id[e] for e in edge_heads))
+        edge_tails = np.array(list(node_id_to_batch_node_id[e] for e in edge_tails))
 
         return (edge_heads, edge_relations, edge_tails, is_query, label, batch_id_to_node_id, p_select), len(entity_set)
 
     @staticmethod
+    #@profile
     def add_component(edge_heads, edge_relations, edge_tails, is_query, labels, cumulative_entities,
                       batch_id_to_node_id, p_selections, component):
         c_edge_heads, c_edge_relations, c_edge_tails, c_is_query, c_label, c_batch_id_to_node_id, p_select = component
@@ -158,6 +165,7 @@ class WikiKG90MProcessedDataset(Dataset):
                        head_sampler: torch.nn.Module = None, tail_sampler: torch.nn.Module = None):
         assert (head_sampler is None and tail_sampler is None) or (head_sampler is not None and tail_sampler is not None), "Requires both head_sampler and tail_sampler if given."
 
+        #@profile
         def wikikg_collate_fn(batch):
             parameterized_sampling = head_sampler is not None
             batch_id_to_node_id = array("i")
@@ -170,7 +178,7 @@ class WikiKG90MProcessedDataset(Dataset):
             cumulative_entities = 0
 
             if sample_negs:
-                neg_candidates = np.random.randint(0, self.num_entities, size=(len(batch), sample_negs))
+                neg_candidates = np.random.randint(0, self.num_entities, size=(len(batch), sample_negs)) # 125 e-6
             else:
                 neg_candidates = np.empty((len(batch), 0), dtype=np.int64)
 
@@ -201,7 +209,7 @@ class WikiKG90MProcessedDataset(Dataset):
             entity_feat = None  # TODO: Remove this
             queries = torch.from_numpy(np.array(is_query)).long()
             labels = torch.from_numpy(np.array(labels)).long()
-            p_selections = torch.cat(p_selections) if parameterized_sampling else None
+            p_selections = torch.cat(p_selections) if parameterized_sampling else None  # 308 e-6
             return ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, p_selections
         return wikikg_collate_fn
 

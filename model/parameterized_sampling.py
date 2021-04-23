@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+#from utils.profile import profile
 
 MAX_EDGES_TO_CONSIDER = 10000
 
@@ -10,6 +10,7 @@ class ParameterizedSampler(nn.Module):
         self.score_table = nn.Parameter(
             torch.ones((num_query_relation_types, num_sample_relation_types), dtype=torch.float))
 
+    #@profile
     def forward(self, r_query, r_samples, num_samples, use_topk=False, replacement=True):
         """
         :param r_query: (int like)

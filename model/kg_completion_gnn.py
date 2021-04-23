@@ -137,6 +137,9 @@ class KGCompletionGNN(nn.Module):
         if parameterized_sampling:
             self.head_sampler = ParameterizedSampler(num_relations, 2*num_relations)
             self.tail_sampler = ParameterizedSampler(num_relations, 2*num_relations)
+        else:
+            self.head_sampler = None
+            self.tail_sampler = None
 
         self.relation_embedding = nn.Embedding(num_relations, embed_dim)
         self.edge_input_transform = nn.Linear(input_dim + 1, embed_dim)
