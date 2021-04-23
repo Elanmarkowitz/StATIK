@@ -36,25 +36,27 @@ DEBUGGING_MODEL = False
 
 
 def prepare_batch_for_model(batch, dataset: WikiKG90MProcessedDataset, save_batch=False):
-    ht_tensor, r_tensor, entity_set, entity_feat, queries, labels = batch
+    ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives = batch
     if entity_feat is None:
         entity_feat = torch.from_numpy(dataset.entity_feat[entity_set]).float()
     relation_feat = torch.tensor(dataset.relation_feat).float()
-    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels
+    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives
     if save_batch:
         pickle.dump(batch, open('sample_batch.pkl', 'wb'))
     return batch
 
 
 def move_batch_to_device(batch, device):
-    ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels = batch
+    ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives = batch
     ht_tensor = ht_tensor.to(device)
     r_tensor = r_tensor.to(device)
     entity_feat = entity_feat.to(device)
     relation_feat = relation_feat.to(device)
     queries = queries.to(device)
     labels = labels.to(device)
-    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels
+    r_queries = r_queries.to(device)
+    r_relatives = r_relatives.to(device)
+    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives
     return batch
 
 
@@ -66,7 +68,7 @@ def train_inner(model, train_loader, opt, dataset, device, print_output=True):
         model.train()
         batch = prepare_batch_for_model(batch, dataset)
         batch = move_batch_to_device(batch, device)
-        ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels = batch
+        ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives = batch
         preds = model(ht_tensor, r_tensor, entity_feat, relation_feat, queries)
         loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
 
