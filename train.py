@@ -40,30 +40,34 @@ flags.DEFINE_integer("valid_batch_size", 1, "Batch size for validation (does all
 flags.DEFINE_integer("epochs", 1, "Num epochs to train for")
 flags.DEFINE_bool('inference_only', False, 'Whether or not to do a complete inference run across the validation set')
 flags.DEFINE_string('model_path', 'best_model_attn.pt', 'Path where the model is saved')
+flags.DEFINE_bool("distributed", True, "Indicate whether to use distributed training.")
 
 DEBUGGING_MODEL = False
 
 
 def prepare_batch_for_model(batch, dataset: WikiKG90MProcessedDataset, save_batch=False):
-    ht_tensor, r_tensor, entity_set, entity_feat, queries, labels = batch
+    ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
     if entity_feat is None:
         entity_feat = torch.from_numpy(dataset.entity_feat[entity_set]).float()
     relation_feat = torch.tensor(dataset.relation_feat).float()
-    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels
+    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
     if save_batch:
         pickle.dump(batch, open('sample_batch.pkl', 'wb'))
     return batch
 
 
 def move_batch_to_device(batch, device):
-    ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels = batch
+    ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
     ht_tensor = ht_tensor.to(device)
     r_tensor = r_tensor.to(device)
     entity_feat = entity_feat.to(device)
     relation_feat = relation_feat.to(device)
     queries = queries.to(device)
     labels = labels.to(device)
-    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels
+    r_queries = r_queries.to(device)
+    r_relatives = r_relatives.to(device)
+    h_or_t_sample = h_or_t_sample.to(device)
+    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
     return batch
 
 
@@ -148,6 +152,54 @@ def train(global_rank, local_rank, world):
             scheduler.step()
 
 
+def train_inner(model, train_loader, opt, dataset, device, print_output=True):
+    moving_average_loss = torch.tensor(1.0)
+    moving_average_acc = torch.tensor(0.5)
+    moving_avg_rank = torch.tensor(10.0)
+    for i, batch in enumerate(tqdm.tqdm(train_loader)):
+        model.train()
+        batch = prepare_batch_for_model(batch, dataset)
+        batch = move_batch_to_device(batch, device)
+        ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
+        preds = model(ht_tensor, r_tensor, entity_feat, relation_feat, queries)
+        loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
+
+        correct = torch.eq((preds > 0).long().flatten(), labels)
+        score_1 = preds[labels == 1].detach().cpu().flatten()[0]
+        score_0 = torch.topk(preds[labels == 0].detach().cpu().flatten().float()[:100], k=9).values
+        rank = 1 + torch.less(score_1, score_0).sum()
+        moving_avg_rank = .9995 * moving_avg_rank + .0005 * rank.float()
+
+        training_acc = correct.float().mean()
+        moving_average_loss = .999 * moving_average_loss + 0.001 * loss.detach().cpu()
+        moving_average_acc = .99 * moving_average_acc + 0.01 * training_acc.detach().cpu()
+
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+        if (i + 1) % FLAGS.print_freq == 0 and print_output:
+            print(f"loss={loss.detach().cpu().numpy():.5f}, avg={moving_average_loss.numpy():.5f}, "
+                  f"train_acc={training_acc.detach().cpu().numpy():.3f}, avg={moving_average_acc.numpy():.3f}, "
+                  f"rank={rank} "
+                  f"avg_rank={moving_avg_rank}")
+
+        if (i + 1) % FLAGS.validate_every == 0 and print_output:
+            model.eval()
+            module = model.module if FLAGS.distributed else model
+            validate(dataset, module, num_batches=FLAGS.validation_batches)
+
+
+def train_single(device):
+    dataset = load_dataset(FLAGS.root_data_dir)
+    train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size, num_workers=FLAGS.num_workers,
+                              collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, sample_negs=1))
+    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers)
+    model.to(device)
+    opt = optim.Adam(model.parameters(), lr=FLAGS.lr)
+    train_inner(model, train_loader, opt, dataset, device)
+
+
 def inference_only(global_rank, local_rank, model_path, world):
     torch.cuda.set_device(local_rank)
     torch.manual_seed(0)
@@ -168,7 +220,7 @@ def inference_only(global_rank, local_rank, model_path, world):
     model.to(local_rank)
     ddp_model = DDP(model, device_ids=[local_rank])
     ddp_model.eval()
-    result = validate(valid_dataset, valid_dataloader, ddp_model, global_rank, local_rank, None, world)
+    result = validate(valid_dataset, valid_dataloader, ddp_model, global_rank, local_rank, FLAGS.validation_batches, world)
     if global_rank == 0:
         mrr = result['mrr']
         print('Validation MRR = {}'.format(mrr))
@@ -183,7 +235,7 @@ def validate(valid_dataset: Dataset, valid_dataloader: DataLoader, model, global
         for i, (batch, t_correct_index) in enumerate(tqdm(valid_dataloader)):
             batch = prepare_batch_for_model(batch, valid_dataset.ds)
             batch = move_batch_to_device(batch, local_rank)
-            ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, _ = batch
+            ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, _, r_queries, r_relatives, h_or_t_sample = batch
             preds = model(ht_tensor, r_tensor, entity_feat, relation_feat, queries)
             preds = preds.reshape(FLAGS.valid_batch_size, 1001)
             t_pred_top10 = preds.topk(10).indices
@@ -214,23 +266,26 @@ def gather_results(t_pred_top10: torch.Tensor, t_correct_index: torch.Tensor, gl
 
 
 def main(argv):
-    grank = int(os.environ['RANK'])
-    ws = int(os.environ['WORLD_SIZE'])
-    master_addr = os.environ['MASTER_ADDR']
-    master_port = os.environ['MASTER_PORT']
-    dist.init_process_group(backend=dist.Backend.NCCL,
-                            init_method="tcp://{}:{}".format(master_addr, master_port), rank=grank, world_size=ws)
+    if FLAGS.distributed:
+        grank = int(os.environ['RANK'])
+        ws = int(os.environ['WORLD_SIZE'])
+        master_addr = os.environ['MASTER_ADDR']
+        master_port = os.environ['MASTER_PORT']
+        dist.init_process_group(backend=dist.Backend.NCCL,
+                                init_method="tcp://{}:{}".format(master_addr, master_port), rank=grank, world_size=ws)
 
-    setproctitle.setproctitle("KGCompletionTrainer:{}".format(grank))
-    world = dist.new_group([i for i in range(ws)], backend=dist.Backend.NCCL)
+        setproctitle.setproctitle("KGCompletionTrainer:{}".format(grank))
+        world = dist.new_group([i for i in range(ws)], backend=dist.Backend.NCCL)
 
-    if FLAGS.edge_attention and FLAGS.relation_scoring:
-        raise Exception("Only one of relation scoring or edge attention can be enabled!")
-    if FLAGS.inference_only:
-        inference_only(grank, FLAGS.local_rank, FLAGS.model_path, world)
+        if FLAGS.edge_attention and FLAGS.relation_scoring:
+            raise Exception("Only one of relation scoring or edge attention can be enabled!")
+        if FLAGS.inference_only:
+            inference_only(grank, FLAGS.local_rank, FLAGS.model_path, world)
+        else:
+            train(grank, FLAGS.local_rank)
+        dist.destroy_process_group()
     else:
-        train(grank, FLAGS.local_rank)
-    dist.destroy_process_group()
+        train_single(FLAGS.device)
 
 
 if __name__ == "__main__":
