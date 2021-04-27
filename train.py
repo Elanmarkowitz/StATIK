@@ -105,7 +105,7 @@ def train(global_rank, local_rank, world):
             ddp_model.train()
             batch = prepare_batch_for_model(batch, dataset)
             batch = move_batch_to_device(batch, local_rank)
-            ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels = batch
+            ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
             preds = ddp_model(ht_tensor, r_tensor, entity_feat, relation_feat, queries)
             loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
 
@@ -282,7 +282,7 @@ def main(argv):
         if FLAGS.inference_only:
             inference_only(grank, FLAGS.local_rank, FLAGS.model_path, world)
         else:
-            train(grank, FLAGS.local_rank)
+            train(grank, FLAGS.local_rank, world)
         dist.destroy_process_group()
     else:
         train_single(FLAGS.device)
