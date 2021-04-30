@@ -1,6 +1,7 @@
 # Branch keshav
 
 import torch
+import torch.nn.functional as F
 import math
 from torch import nn
 from torch import Tensor
@@ -12,10 +13,10 @@ class MessageCalculationLayer(nn.Module):
     def __init__(self, embed_dim: int, message_weighting_function=None):
         super(MessageCalculationLayer, self).__init__()
         self.embed_dim = embed_dim
-        self.transform_message = nn.Linear(4 * embed_dim, embed_dim)
+        self.transform_message = nn.Linear(2 * embed_dim, embed_dim)
         self.message_weighting_function = message_weighting_function
 
-    def forward(self, H: Tensor, E: Tensor, heads: Tensor, r_embed: Tensor, queries: Tensor):
+    def forward(self, H: Tensor, E: Tensor, heads: Tensor, queries: Tensor):
         """
         :param H: shape n x embed_dim
         :param E: shape m x embed_dim
@@ -25,7 +26,7 @@ class MessageCalculationLayer(nn.Module):
             processed messages for nodes. shape nodes_in_batch x embed_dim
         """
         H_heads = H[heads]
-        raw_messages = torch.cat([H_heads, E, H_heads * r_embed, E * r_embed], dim=1)
+        raw_messages = torch.cat([H_heads, E], dim=1)
         messages = self.transform_message(raw_messages)
         message_weights = self.message_weighting_function(E, queries) if self.message_weighting_function is not None else None
 
@@ -103,7 +104,7 @@ class MessagePassingLayer(nn.Module):
 
         return agg_messages
 
-    def forward(self, H: Tensor, E: Tensor, ht: Tensor, r_embed, queries, influence_weights):
+    def forward(self, H: Tensor, E: Tensor, ht: Tensor, queries, influence_weights):
         """
         :param H: shape n x embed_dim
         :param E: shape m x embed_dim
@@ -111,8 +112,8 @@ class MessagePassingLayer(nn.Module):
         :param r_embed: shape m x embed_dim
         :return:
         """
-        messages_fwd = self.calc_messages_fwd(H, E, ht[:, 0], r_embed, queries)
-        messages_back = self.calc_messages_back(H, E, ht[:, 1], r_embed, queries)
+        messages_fwd = self.calc_messages_fwd(H, E, ht[:, 0], queries)
+        messages_back = self.calc_messages_back(H, E, ht[:, 1], queries)
         aggregated_messages = self.aggregate_messages(ht, messages_fwd, messages_back, H.shape[0], influence_weights)
         out = self.norm(self.act(aggregated_messages) + H)
         return out
@@ -168,15 +169,19 @@ class EdgeUpdateLayer(nn.Module):
 
 
 class KGCompletionGNN(nn.Module):
-    def __init__(self, num_relations: int, input_dim: int, embed_dim: int, num_layers: int, edge_attention=False, relation_scoring=False):
+    def __init__(self, num_relations: int, relation_feat, input_dim: int, embed_dim: int, num_layers: int, edge_attention=False,
+                 relation_scoring=False):
         super(KGCompletionGNN, self).__init__()
         self.embed_dim = embed_dim
         self.num_layers = num_layers
 
-        self.relation_embedding = nn.Embedding(num_relations, embed_dim)
-        self.edge_input_transform = nn.Linear(input_dim + 1, embed_dim)
+        self.relation_embedding = nn.Embedding(relation_feat.shape[0], relation_feat.shape[1])
+        self.relation_embedding.weight = nn.Parameter(torch.tensor(relation_feat, dtype=torch.float))
+        self.edge_input_transform = nn.Linear(relation_feat.shape[1], embed_dim)
+        self.relation_influence_table = nn.Parameter(torch.ones(num_relations, num_relations), requires_grad=True) if relation_scoring else None
+
         self.entity_input_transform = nn.Linear(input_dim, embed_dim)
-        self.entity_influence_table = nn.Parameter(torch.ones(num_relations, num_relations), requires_grad=True) if relation_scoring else None
+
         self.message_weighting_function = MessageWeightingFunction(embed_dim, embed_dim // 2) if edge_attention else None
         self.norm_entity = nn.LayerNorm(embed_dim)
         self.norm_edge = nn.LayerNorm(embed_dim)
@@ -200,26 +205,27 @@ class KGCompletionGNN(nn.Module):
         value_idxs[0] = 0
         relevant_query_idxs = torch.cumsum(value_idxs, dim=0)
         relevant_queries_relation_types = query_relation_types[relevant_query_idxs]
-        influence_weights = self.entity_influence_table[relevant_queries_relation_types, r_tensor]
+        influence_weights = self.relation_influence_table[relevant_queries_relation_types, r_tensor]
         return self.softmax(influence_weights).tile(2)
 
-    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, relation_feat: Tensor, queries: Tensor) -> Tensor:
-        r_embed = self.relation_embedding(r_tensor)
+    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, queries: Tensor) -> Tensor:
+        # Transform entities
         H_0 = self.act(self.entity_input_transform(entity_feat))
         H_0 = self.norm_entity(H_0)
         H = H_0
 
-        E_0 = relation_feat[r_tensor]
-        E_0 = self.act(self.edge_input_transform(torch.cat([E_0, queries.reshape(-1, 1)], dim=1)))
+        # Transform relations
+        r_embed = self.relation_embedding(r_tensor)
+        E_0 = self.act(self.edge_input_transform(r_embed))
         E_0 = self.norm_edge(E_0)
         E = E_0
 
-        influence_weights = self.compute_pairwise_relation_importance(queries, r_tensor) if self.entity_influence_table is not None else None
+        # Compute pairwise relation importance from scoring table
+        influence_weights = self.compute_pairwise_relation_importance(queries, r_tensor) if self.relation_influence_table is not None else None
 
         for i in range(self.num_layers):
-            H = self.message_passing_layers[i](H, E, ht, r_embed, queries, influence_weights)
+            H = self.message_passing_layers[i](H, E, ht, queries, influence_weights)
             E = self.edge_update_layers[i](H, E, ht)
 
         out = self.classify_triple(H, E, H_0, E_0, ht, queries)
-
         return out

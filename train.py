@@ -49,25 +49,24 @@ def prepare_batch_for_model(batch, dataset: WikiKG90MProcessedDataset, save_batc
     ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
     if entity_feat is None:
         entity_feat = torch.from_numpy(dataset.entity_feat[entity_set]).float()
-    relation_feat = torch.tensor(dataset.relation_feat).float()
-    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
+
+    batch = ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
     if save_batch:
         pickle.dump(batch, open('sample_batch.pkl', 'wb'))
     return batch
 
 
 def move_batch_to_device(batch, device):
-    ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
+    ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
     ht_tensor = ht_tensor.to(device)
     r_tensor = r_tensor.to(device)
     entity_feat = entity_feat.to(device)
-    relation_feat = relation_feat.to(device)
     queries = queries.to(device)
     labels = labels.to(device)
     r_queries = r_queries.to(device)
     r_relatives = r_relatives.to(device)
     h_or_t_sample = h_or_t_sample.to(device)
-    batch = ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
+    batch = ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
     return batch
 
 
@@ -84,16 +83,20 @@ def train(global_rank, local_rank, world):
                               collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, sample_negs=1))
 
     valid_dataset = Wiki90MValidationDataset(dataset)
-    valid_sampler = DistributedSampler(valid_dataset, rank=global_rank, shuffle=True)
+    valid_sampler = DistributedSampler(valid_dataset, rank=global_rank, shuffle=False)
     valid_dataloader = DataLoader(valid_dataset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers, sampler=valid_sampler,
                                   drop_last=True, collate_fn=valid_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
 
-    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, edge_attention=FLAGS.edge_attention,
+    model = KGCompletionGNN(dataset.num_relations, dataset.relation_feat, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers,
+                            edge_attention=FLAGS.edge_attention,
                             relation_scoring=FLAGS.relation_scoring)
     model.to(local_rank)
+
     ddp_model = DDP(model, device_ids=[local_rank], process_group=world, find_unused_parameters=True)
     opt = optim.Adam(ddp_model.parameters(), lr=FLAGS.lr)
-    scheduler = optim.lr_scheduler.MultiStepLR(opt, milestones=[math.floor(len(train_loader) / 2), len(train_loader)], gamma=0.5)
+    scheduler = optim.lr_scheduler.MultiStepLR(opt,
+                                               milestones=[math.floor(len(train_loader) / 4), math.floor(len(train_loader) / 2), len(train_loader)],
+                                               gamma=0.5)
 
     moving_average_loss = torch.tensor(1.0, device=local_rank)
     moving_average_acc = torch.tensor(0.5, device=local_rank)
@@ -105,8 +108,9 @@ def train(global_rank, local_rank, world):
             ddp_model.train()
             batch = prepare_batch_for_model(batch, dataset)
             batch = move_batch_to_device(batch, local_rank)
-            ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
-            preds = ddp_model(ht_tensor, r_tensor, entity_feat, relation_feat, queries)
+            ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
+            preds = ddp_model(ht_tensor, r_tensor, entity_feat, queries)
+
             loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
 
             correct = torch.eq((preds > 0).long().flatten(), labels)
@@ -114,8 +118,8 @@ def train(global_rank, local_rank, world):
             score_0 = torch.topk(preds[labels == 0].detach().cpu().flatten().float()[:100], k=9).values
             rank = 1 + torch.less(score_1, score_0).sum()
             moving_avg_rank = .9995 * moving_avg_rank + .0005 * rank.float()
-
             training_acc = correct.float().mean()
+
             moving_average_loss = .999 * moving_average_loss + 0.001 * loss.detach()
             moving_average_acc = .99 * moving_average_acc + 0.01 * training_acc.detach()
 
@@ -142,7 +146,7 @@ def train(global_rank, local_rank, world):
                     mrr = result['mrr']
                     if mrr > max_mrr:
                         max_mrr = mrr
-                        torch.save(ddp_model.module.state_dict(), 'best_model_attn.pt')
+                        torch.save(ddp_model.module.state_dict(), 'best_model_no_attn.pt')
 
                     print('Current MRR = {}, Best MRR = {}'.format(mrr, max_mrr))
 
@@ -226,7 +230,8 @@ def inference_only(global_rank, local_rank, model_path, world):
         print('Validation MRR = {}'.format(mrr))
 
 
-def validate(valid_dataset: Dataset, valid_dataloader: DataLoader, model, global_rank: int, local_rank: int, num_batches: int = None, world=None):
+def validate(valid_dataset: Dataset, valid_dataloader: DataLoader, model, global_rank: int, local_rank: int, num_batches: int = None,
+             world=None):
     evaluator = WikiKG90MEvaluator()
 
     top_10s = []
@@ -235,8 +240,8 @@ def validate(valid_dataset: Dataset, valid_dataloader: DataLoader, model, global
         for i, (batch, t_correct_index) in enumerate(tqdm(valid_dataloader)):
             batch = prepare_batch_for_model(batch, valid_dataset.ds)
             batch = move_batch_to_device(batch, local_rank)
-            ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, _, r_queries, r_relatives, h_or_t_sample = batch
-            preds = model(ht_tensor, r_tensor, entity_feat, relation_feat, queries)
+            ht_tensor, r_tensor, entity_set, entity_feat, queries, _, r_queries, r_relatives, h_or_t_sample = batch
+            preds = model(ht_tensor, r_tensor, entity_feat, queries)
             preds = preds.reshape(FLAGS.valid_batch_size, 1001)
             t_pred_top10 = preds.topk(10).indices
             t_pred_top10 = t_pred_top10.detach()
