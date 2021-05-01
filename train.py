@@ -6,6 +6,7 @@ from absl import app, flags
 import os
 import pickle
 import numpy as np
+import pdb
 
 import setproctitle
 
@@ -38,8 +39,9 @@ flags.DEFINE_bool("relation_scoring", False, "Whether or not to learn pairwise r
 flags.DEFINE_integer("validation_batches", 1000, "Number of batches to do for each validation check.")
 flags.DEFINE_integer("valid_batch_size", 1, "Batch size for validation (does all t_candidates at once).")
 flags.DEFINE_integer("epochs", 1, "Num epochs to train for")
+flags.DEFINE_float("margin", 1.0, "Margin in transE loss")
 flags.DEFINE_bool('inference_only', False, 'Whether or not to do a complete inference run across the validation set')
-flags.DEFINE_string('model_path', 'best_model_attn.pt', 'Path where the model is saved')
+flags.DEFINE_string('model_path', 'best_model_attn.pt', 'Path where the model is saved/to be saved')
 flags.DEFINE_bool("distributed", True, "Indicate whether to use distributed training.")
 
 DEBUGGING_MODEL = False
@@ -93,7 +95,7 @@ def train(global_rank, local_rank, world):
     model.to(local_rank)
 
     ddp_model = DDP(model, device_ids=[local_rank], process_group=world, find_unused_parameters=True)
-    loss_fn = TransELoss(margin=1.0)
+    loss_fn = TransELoss(margin=FLAGS.margin)
     target = torch.tensor([-1], dtype=torch.long, device=local_rank)
     opt = optim.Adam(ddp_model.parameters(), lr=FLAGS.lr)
     scheduler = optim.lr_scheduler.MultiStepLR(opt,
@@ -112,7 +114,8 @@ def train(global_rank, local_rank, world):
             batch = move_batch_to_device(batch, local_rank)
             ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
             H, E = ddp_model(ht_tensor, r_tensor, entity_feat, queries)
-            loss = loss_fn(H, E, ht_tensor, labels, target)
+
+            loss = loss_fn(H, E, ht_tensor, labels, queries, target)
 
             # loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
 
@@ -143,20 +146,20 @@ def train(global_rank, local_rank, world):
 
             if (i + 1) % FLAGS.validate_every == 0:
                 ddp_model.eval()
-                result = validate(valid_dataset, valid_dataloader, ddp_model, loss_fn, global_rank, local_rank, num_batches=FLAGS.validation_batches,
+                result = validate(valid_dataset, valid_dataloader, ddp_model, global_rank, local_rank, num_batches=FLAGS.validation_batches,
                                   world=world)
                 if global_rank == 0:
                     mrr = result['mrr']
                     if mrr > max_mrr:
                         max_mrr = mrr
-                        torch.save(ddp_model.module.state_dict(), 'best_model_no_attn.pt')
+                        torch.save(ddp_model.module.state_dict(), FLAGS.model_path)
 
                     print('Current MRR = {}, Best MRR = {}'.format(mrr, max_mrr))
 
             opt.zero_grad()
             loss.backward()
             opt.step()
-            scheduler.step()
+            #scheduler.step()
 
 
 def train_inner(model, train_loader, opt, dataset, device, print_output=True):
@@ -215,10 +218,10 @@ def inference_only(global_rank, local_rank, model_path, world):
 
     dataset = load_dataset(FLAGS.root_data_dir)
     valid_dataset = Wiki90MValidationDataset(dataset)
-    valid_sampler = DistributedSampler(valid_dataset, rank=global_rank, shuffle=True)
+    valid_sampler = DistributedSampler(valid_dataset, rank=global_rank, shuffle=False)
     valid_dataloader = DataLoader(valid_dataset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers, sampler=valid_sampler,
                                   drop_last=True, collate_fn=valid_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
-    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, edge_attention=FLAGS.edge_attention,
+    model = KGCompletionGNN(dataset.num_relations, dataset.relation_feat, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, edge_attention=FLAGS.edge_attention,
                             relation_scoring=FLAGS.relation_scoring)
 
     if global_rank == 0:
@@ -233,7 +236,7 @@ def inference_only(global_rank, local_rank, model_path, world):
         print('Validation MRR = {}'.format(mrr))
 
 
-def validate(valid_dataset: Dataset, valid_dataloader: DataLoader, model, transELoss, global_rank: int, local_rank: int, num_batches: int = None,
+def validate(valid_dataset: Dataset, valid_dataloader: DataLoader, model, global_rank: int, local_rank: int, num_batches: int = None,
              world=None):
     evaluator = WikiKG90MEvaluator()
 
@@ -244,9 +247,7 @@ def validate(valid_dataset: Dataset, valid_dataloader: DataLoader, model, transE
             batch = prepare_batch_for_model(batch, valid_dataset.ds)
             batch = move_batch_to_device(batch, local_rank)
             ht_tensor, r_tensor, entity_set, entity_feat, queries, _, r_queries, r_relatives, h_or_t_sample = batch
-            H, E = model(ht_tensor, r_tensor, entity_feat, queries)
-            query_idxs = queries.nonzero().flatten()
-            preds = -1 * transELoss._distance(H[ht_tensor[query_idxs, 0]], E[query_idxs], H[ht_tensor[query_idxs, 1]])
+            preds = model(ht_tensor, r_tensor, entity_feat, queries)
             preds = preds.reshape(FLAGS.valid_batch_size, 1001)
             t_pred_top10 = preds.topk(10).indices
             t_pred_top10 = t_pred_top10.detach()

@@ -169,11 +169,12 @@ class EdgeUpdateLayer(nn.Module):
 
 
 class KGCompletionGNN(nn.Module):
-    def __init__(self, num_relations: int, relation_feat, input_dim: int, embed_dim: int, num_layers: int, edge_attention=False,
+    def __init__(self, num_relations: int, relation_feat, input_dim: int, embed_dim: int, num_layers: int, norm=2, edge_attention=False,
                  relation_scoring=False):
         super(KGCompletionGNN, self).__init__()
         self.embed_dim = embed_dim
         self.num_layers = num_layers
+        self.norm = norm
 
         self.relation_embedding = nn.Embedding(relation_feat.shape[0], relation_feat.shape[1])
         self.relation_embedding.weight = nn.Parameter(torch.tensor(relation_feat, dtype=torch.float))
@@ -208,7 +209,7 @@ class KGCompletionGNN(nn.Module):
         influence_weights = self.relation_influence_table[relevant_queries_relation_types, r_tensor]
         return self.softmax(influence_weights).tile(2)
 
-    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, queries: Tensor) -> Tensor:
+    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, queries: Tensor):
         # Transform entities
         H_0 = self.act(self.entity_input_transform(entity_feat))
         H_0 = self.norm_entity(H_0)
@@ -229,8 +230,13 @@ class KGCompletionGNN(nn.Module):
 
         # out = self.classify_triple(H, E, H_0, E_0, ht, queries)
 
-        # Return the updated entity embeddings and relation embeddings
-        return H, E
+        if not self.training:
+            query_idxs = queries.nonzero().flatten()
+            batch_negative_distances = -1 * TransELoss.distance(H[ht[query_idxs, 0]], E[query_idxs], H[ht[query_idxs, 1]], self.norm)
+            return batch_negative_distances
+        else:
+            # Return the updated entity embeddings and relation embeddings as well as distanced for the entire batch
+            return H, E
 
 
 class TransELoss(nn.Module):
@@ -240,25 +246,29 @@ class TransELoss(nn.Module):
         self.distance_norm = distance_norm
         self.criterion = nn.MarginRankingLoss(margin=margin)
 
-    def forward(self, H, E, ht, labels, y):
+    def forward(self, H, E, ht, labels, queries, y):
         positives = labels.nonzero(as_tuple=False).flatten()
         negatives = (labels == 0).nonzero(as_tuple=False).flatten()
+        query_idxs = queries.nonzero().flatten()
+        ht_q = ht[query_idxs]
+        E_q = E[query_idxs]
 
-        positive_head_embeds = H[ht[positives, 0]]
-        positive_tail_embeds = H[ht[positives, 1]]
-        positive_relation_embeds = E[positives]
+        positive_head_embeds = H[ht_q[positives, 0]]
+        positive_tail_embeds = H[ht_q[positives, 1]]
+        positive_relation_embeds = E_q[positives]
 
-        negative_head_embeds = H[ht[negatives, 0]]
-        negative_tail_embeds = H[ht[negatives, 1]]
-        negative_relation_embeds = E[negatives]
+        negative_head_embeds = H[ht_q[negatives, 0]]
+        negative_tail_embeds = H[ht_q[negatives, 1]]
+        negative_relation_embeds = E_q[negatives]
 
-        positive_distances = self._distance(positive_head_embeds, positive_relation_embeds, positive_tail_embeds)
-        negative_distances = self._distance(negative_head_embeds, negative_relation_embeds, negative_tail_embeds)
+        positive_distances = TransELoss.distance(positive_head_embeds, positive_relation_embeds, positive_tail_embeds, self.distance_norm)
+        negative_distances = TransELoss.distance(negative_head_embeds, negative_relation_embeds, negative_tail_embeds, self.distance_norm)
 
         return self.criterion(positive_distances, negative_distances, y)
 
-    def _distance(self, head_embeds, relation_embeds, tail_embeds):
+    @staticmethod
+    def distance(head_embeds, relation_embeds, tail_embeds, p):
         head_embeds = F.normalize(head_embeds, p=2, dim=1)
         tail_embeds = F.normalize(tail_embeds, p=2, dim=1)
-        distances = torch.norm(head_embeds + relation_embeds - tail_embeds, p=self.distance_norm, dim=1)
+        distances = torch.norm(head_embeds + relation_embeds - tail_embeds, p=p, dim=1)
         return distances
