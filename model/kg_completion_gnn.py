@@ -227,5 +227,38 @@ class KGCompletionGNN(nn.Module):
             H = self.message_passing_layers[i](H, E, ht, queries, influence_weights)
             E = self.edge_update_layers[i](H, E, ht)
 
-        out = self.classify_triple(H, E, H_0, E_0, ht, queries)
-        return out
+        # out = self.classify_triple(H, E, H_0, E_0, ht, queries)
+
+        # Return the updated entity embeddings and relation embeddings
+        return H, E
+
+
+class TransELoss(nn.Module):
+    def __init__(self, margin, distance_norm=2):
+        super(TransELoss, self).__init__()
+        self.margin = margin
+        self.distance_norm = distance_norm
+        self.criterion = nn.MarginRankingLoss(margin=margin)
+
+    def forward(self, H, E, ht, labels, y):
+        positives = labels.nonzero(as_tuple=False).flatten()
+        negatives = (labels == 0).nonzero(as_tuple=False).flatten()
+
+        positive_head_embeds = H[ht[positives, 0]]
+        positive_tail_embeds = H[ht[positives, 1]]
+        positive_relation_embeds = E[positives]
+
+        negative_head_embeds = H[ht[negatives, 0]]
+        negative_tail_embeds = H[ht[negatives, 1]]
+        negative_relation_embeds = E[negatives]
+
+        positive_distances = self._distance(positive_head_embeds, positive_relation_embeds, positive_tail_embeds)
+        negative_distances = self._distance(negative_head_embeds, negative_relation_embeds, negative_tail_embeds)
+
+        return self.criterion(positive_distances, negative_distances, y)
+
+    def _distance(self, head_embeds, relation_embeds, tail_embeds):
+        head_embeds = F.normalize(head_embeds, p=2, dim=1)
+        tail_embeds = F.normalize(tail_embeds, p=2, dim=1)
+        distances = torch.norm(head_embeds + relation_embeds - tail_embeds, p=self.distance_norm, dim=1)
+        return distances

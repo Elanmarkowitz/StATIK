@@ -19,7 +19,7 @@ from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from tqdm import tqdm
 
 from data.data_loading import load_dataset, WikiKG90MProcessedDataset, Wiki90MValidationDataset
-from model.kg_completion_gnn import KGCompletionGNN
+from model.kg_completion_gnn import KGCompletionGNN, TransELoss
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("root_data_dir", "/nas/home/elanmark/data", "Root data dir for installing the ogb dataset")
@@ -93,6 +93,8 @@ def train(global_rank, local_rank, world):
     model.to(local_rank)
 
     ddp_model = DDP(model, device_ids=[local_rank], process_group=world, find_unused_parameters=True)
+    loss_fn = TransELoss(margin=1.0)
+    target = torch.tensor([-1], dtype=torch.long, device=local_rank)
     opt = optim.Adam(ddp_model.parameters(), lr=FLAGS.lr)
     scheduler = optim.lr_scheduler.MultiStepLR(opt,
                                                milestones=[math.floor(len(train_loader) / 4), math.floor(len(train_loader) / 2), len(train_loader)],
@@ -109,38 +111,39 @@ def train(global_rank, local_rank, world):
             batch = prepare_batch_for_model(batch, dataset)
             batch = move_batch_to_device(batch, local_rank)
             ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
-            preds = ddp_model(ht_tensor, r_tensor, entity_feat, queries)
+            H, E = ddp_model(ht_tensor, r_tensor, entity_feat, queries)
+            loss = loss_fn(H, E, ht_tensor, labels, target)
 
-            loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
+            # loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
 
-            correct = torch.eq((preds > 0).long().flatten(), labels)
-            score_1 = preds[labels == 1].detach().cpu().flatten()[0]
-            score_0 = torch.topk(preds[labels == 0].detach().cpu().flatten().float()[:100], k=9).values
-            rank = 1 + torch.less(score_1, score_0).sum()
-            moving_avg_rank = .9995 * moving_avg_rank + .0005 * rank.float()
-            training_acc = correct.float().mean()
+            # correct = torch.eq((preds > 0).long().flatten(), labels)
+            # score_1 = preds[labels == 1].detach().cpu().flatten()[0]
+            # score_0 = torch.topk(preds[labels == 0].detach().cpu().flatten().float()[:100], k=9).values
+            # rank = 1 + torch.less(score_1, score_0).sum()
+            # moving_avg_rank = .9995 * moving_avg_rank + .0005 * rank.float()
+            # training_acc = correct.float().mean()
 
             moving_average_loss = .999 * moving_average_loss + 0.001 * loss.detach()
-            moving_average_acc = .99 * moving_average_acc + 0.01 * training_acc.detach()
+            # moving_average_acc = .99 * moving_average_acc + 0.01 * training_acc.detach()
 
             if (i + 1) % FLAGS.print_freq == 0:
                 dist.all_reduce(moving_average_loss, group=world)
-                dist.all_reduce(moving_average_acc, group=world)
-                dist.all_reduce(moving_avg_rank, group=world)
+                # dist.all_reduce(moving_average_acc, group=world)
+                # dist.all_reduce(moving_avg_rank, group=world)
 
                 moving_average_loss /= dist.get_world_size()
-                moving_average_acc /= dist.get_world_size()
-                moving_avg_rank /= dist.get_world_size()
+                # moving_average_acc /= dist.get_world_size()
+                # moving_avg_rank /= dist.get_world_size()
 
                 if global_rank == 0:
                     print(f"Iteration={i}/{len(train_loader)}, "
-                          f"Moving Avg Loss={moving_average_loss.cpu().numpy():.5f}, "
-                          f"Moving Avg Train Acc={moving_average_acc.cpu().numpy():.3f}, "
-                          f"Moving Avg Rank={moving_avg_rank.cpu().numpy()}")
+                          f"Moving Avg Loss={moving_average_loss.cpu().numpy():.5f}")
+                    # f"Moving Avg Train Acc={moving_average_acc.cpu().numpy():.3f}, "
+                    # f"Moving Avg Rank={moving_avg_rank.cpu().numpy()}")
 
             if (i + 1) % FLAGS.validate_every == 0:
                 ddp_model.eval()
-                result = validate(valid_dataset, valid_dataloader, ddp_model, global_rank, local_rank, num_batches=FLAGS.validation_batches,
+                result = validate(valid_dataset, valid_dataloader, ddp_model, loss_fn, global_rank, local_rank, num_batches=FLAGS.validation_batches,
                                   world=world)
                 if global_rank == 0:
                     mrr = result['mrr']
@@ -230,7 +233,7 @@ def inference_only(global_rank, local_rank, model_path, world):
         print('Validation MRR = {}'.format(mrr))
 
 
-def validate(valid_dataset: Dataset, valid_dataloader: DataLoader, model, global_rank: int, local_rank: int, num_batches: int = None,
+def validate(valid_dataset: Dataset, valid_dataloader: DataLoader, model, transELoss, global_rank: int, local_rank: int, num_batches: int = None,
              world=None):
     evaluator = WikiKG90MEvaluator()
 
@@ -241,7 +244,9 @@ def validate(valid_dataset: Dataset, valid_dataloader: DataLoader, model, global
             batch = prepare_batch_for_model(batch, valid_dataset.ds)
             batch = move_batch_to_device(batch, local_rank)
             ht_tensor, r_tensor, entity_set, entity_feat, queries, _, r_queries, r_relatives, h_or_t_sample = batch
-            preds = model(ht_tensor, r_tensor, entity_feat, queries)
+            H, E = model(ht_tensor, r_tensor, entity_feat, queries)
+            query_idxs = queries.nonzero().flatten()
+            preds = -1 * transELoss._distance(H[ht_tensor[query_idxs, 0]], E[query_idxs], H[ht_tensor[query_idxs, 1]])
             preds = preds.reshape(FLAGS.valid_batch_size, 1001)
             t_pred_top10 = preds.topk(10).indices
             t_pred_top10 = t_pred_top10.detach()
