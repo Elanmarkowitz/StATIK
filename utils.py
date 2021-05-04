@@ -25,20 +25,22 @@ def load_model(path: str):
     return model
 
 
-def save_checkpoint(model: KGCompletionGNN, epoch, opt: torch.optim.Optimizer, path: str):
+def save_checkpoint(model: KGCompletionGNN, next_epoch, opt: torch.optim.Optimizer,
+                    scheduler: torch.optim.lr_scheduler.MultiStepLR, path: str):
     save_obj = {
         'model_type': type(model),
         'instantiation_args': model.instantiation_args,
         'arg_signature': model.arg_signature,
         'state_dict': model.state_dict()
     }
-    save_obj.update({'epoch': epoch, 'opt_state_dict': opt.state_dict()})
+    save_obj.update({'next_epoch': next_epoch, 'opt_state_dict': opt.state_dict(), 'scheduler_state_dict': scheduler.state_dict()})
     torch.save(save_obj, path)
 
 
-def load_opt_checkpoint(path: str, opt: torch.optim.Optimizer):
+def load_opt_checkpoint(path: str, opt: torch.optim.Optimizer, scheduler: torch.optim.lr_scheduler.MultiStepLR):
     save_obj = torch.load(path)
     opt.load_state_dict(save_obj['opt_state_dict'])
-    epoch: int = save_obj['epoch']
-    return opt, epoch
+    scheduler.load_state_dict(save_obj['scheduler_state_dict'])
+    epoch: int = save_obj['next_epoch']
+    return epoch
 

@@ -1,6 +1,5 @@
 import math
 import random
-import time
 
 from absl import app, flags
 import os
@@ -20,6 +19,7 @@ from tqdm import tqdm
 
 from data.data_loading import load_dataset, WikiKG90MProcessedDataset, Wiki90MValidationDataset
 from model.kg_completion_gnn import KGCompletionGNN
+from utils import load_model, load_opt_checkpoint, save_checkpoint, save_model
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("root_data_dir", "/nas/home/elanmark/data", "Root data dir for installing the ogb dataset")
@@ -39,10 +39,13 @@ flags.DEFINE_integer("validation_batches", 1000, "Number of batches to do for ea
 flags.DEFINE_integer("valid_batch_size", 1, "Batch size for validation (does all t_candidates at once).")
 flags.DEFINE_integer("epochs", 1, "Num epochs to train for")
 flags.DEFINE_bool('inference_only', False, 'Whether or not to do a complete inference run across the validation set')
-flags.DEFINE_string('model_path', 'best_model_attn.pt', 'Path where the model is saved')
+flags.DEFINE_string('model_path_depr', None, 'DEPRECATED: Path where the model is saved')
+flags.DEFINE_string('model_path', None, 'Path where the model is saved (inference only)')
 flags.DEFINE_bool("distributed", True, "Indicate whether to use distributed training.")
+flags.DEFINE_string("checkpoint", None, "Resume training from checkpoint file in checkpoints directory.")
+flags.DEFINE_string("name", "run01", "A name to use for saving the run.")
 
-DEBUGGING_MODEL = False
+CHECKPOINT_DIR = "checkpoints"
 
 
 def prepare_batch_for_model(batch, dataset: WikiKG90MProcessedDataset, save_batch=False):
@@ -87,23 +90,29 @@ def train(global_rank, local_rank, world):
     valid_dataloader = DataLoader(valid_dataset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers, sampler=valid_sampler,
                                   drop_last=True, collate_fn=valid_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
 
-    model = KGCompletionGNN(dataset.num_relations, dataset.relation_feat, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers,
-                            edge_attention=FLAGS.edge_attention,
-                            relation_scoring=FLAGS.relation_scoring)
+    if FLAGS.checkpoint is not None:
+        model = load_model(os.path.join(CHECKPOINT_DIR, FLAGS.checkpoint))
+    else:
+        model = KGCompletionGNN(dataset.num_relations, dataset.relation_feat, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers,
+                                    edge_attention=FLAGS.edge_attention,
+                                    relation_scoring=FLAGS.relation_scoring)
     model.to(local_rank)
 
     ddp_model = DDP(model, device_ids=[local_rank], process_group=world, find_unused_parameters=True)
     opt = optim.Adam(ddp_model.parameters(), lr=FLAGS.lr)
-    scheduler = optim.lr_scheduler.MultiStepLR(opt,
-                                               milestones=[math.floor(len(train_loader) / 4), math.floor(len(train_loader) / 2), len(train_loader)],
-                                               gamma=0.5)
+    scheduler = optim.lr_scheduler.MultiStepLR(opt, gamma=0.5,
+                                               milestones=[math.floor(len(train_loader) / 4),
+                                                           math.floor(len(train_loader) / 2), len(train_loader)])
+    start_epoch = 0
+    if FLAGS.checkpoint:
+        start_epoch = load_opt_checkpoint(os.path.join(CHECKPOINT_DIR, FLAGS.checkpoint), opt, scheduler)
 
     moving_average_loss = torch.tensor(1.0, device=local_rank)
     moving_average_acc = torch.tensor(0.5, device=local_rank)
     moving_avg_rank = torch.tensor(10.0, device=local_rank)
     max_mrr = 0
 
-    for epoch in range(FLAGS.epochs):
+    for epoch in range(start_epoch, FLAGS.epochs):
         for i, batch in enumerate(tqdm(train_loader)):
             ddp_model.train()
             batch = prepare_batch_for_model(batch, dataset)
@@ -146,7 +155,7 @@ def train(global_rank, local_rank, world):
                     mrr = result['mrr']
                     if mrr > max_mrr:
                         max_mrr = mrr
-                        torch.save(ddp_model.module.state_dict(), 'best_model_no_attn.pt')
+                        save_model(ddp_model.module, os.path.join(CHECKPOINT_DIR, f'{FLAGS.name}_best_model.pkl'))
 
                     print('Current MRR = {}, Best MRR = {}'.format(mrr, max_mrr))
 
@@ -154,6 +163,12 @@ def train(global_rank, local_rank, world):
             loss.backward()
             opt.step()
             scheduler.step()
+
+            # TODO: remove this!
+            if (i+1) % 10 == 0:
+                break
+
+        save_checkpoint(ddp_model.module, epoch+1, opt, scheduler, os.path.join(CHECKPOINT_DIR, f"{FLAGS.name}_e{epoch}.pkl"))
 
 
 def train_inner(model, train_loader, opt, dataset, device, print_output=True):
@@ -204,7 +219,7 @@ def train_single(device):
     train_inner(model, train_loader, opt, dataset, device)
 
 
-def inference_only(global_rank, local_rank, model_path, world):
+def inference_only(global_rank, local_rank, world):
     torch.cuda.set_device(local_rank)
     torch.manual_seed(0)
     random.seed(0)
@@ -219,7 +234,12 @@ def inference_only(global_rank, local_rank, model_path, world):
                             relation_scoring=FLAGS.relation_scoring)
 
     if global_rank == 0:
-        model.load_state_dict(torch.load(model_path))
+        assert FLAGS.model_path_depr is not None or FLAGS.model_path is not None, 'Must be supplied with model to do inference.'
+        if FLAGS.model_path_depr is not None:
+            model.load_state_dict(torch.load(FLAGS))
+        elif FLAGS.model_path is not None:
+            model = load_model(FLAGS.model_path)
+
 
     model.to(local_rank)
     ddp_model = DDP(model, device_ids=[local_rank])
