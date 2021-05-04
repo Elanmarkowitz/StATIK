@@ -1,12 +1,10 @@
-# Branch keshav
+import inspect
 
 import torch
 import torch.nn.functional as F
 import math
 from torch import nn
 from torch import Tensor
-
-import pdb
 
 
 class MessageCalculationLayer(nn.Module):
@@ -172,6 +170,11 @@ class KGCompletionGNN(nn.Module):
     def __init__(self, num_relations: int, relation_feat, input_dim: int, embed_dim: int, num_layers: int, edge_attention=False,
                  relation_scoring=False):
         super(KGCompletionGNN, self).__init__()
+
+        local_vals = locals()
+        self.instantiation_args = [local_vals[arg] for arg in inspect.signature(KGCompletionGNN).parameters]
+        self.arg_signature = list(inspect.signature(KGCompletionGNN).parameters)
+
         self.embed_dim = embed_dim
         self.num_layers = num_layers
 
