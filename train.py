@@ -227,7 +227,7 @@ def inference_only(global_rank, local_rank, world):
     if global_rank == 0:
         assert FLAGS.model_path_depr is not None or FLAGS.model_path is not None, 'Must be supplied with model to do inference.'
         if FLAGS.model_path_depr is not None:
-            model.load_state_dict(torch.load(FLAGS))
+            model.load_state_dict(torch.load(FLAGS.model_path_depr))
         elif FLAGS.model_path is not None:
             model = load_model(FLAGS.model_path)
 
