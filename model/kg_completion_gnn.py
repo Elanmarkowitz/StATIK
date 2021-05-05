@@ -74,7 +74,7 @@ class MessagePassingLayer(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
         self.act = nn.LeakyReLU()
 
-    def aggregate_messages(self, ht: Tensor, messages_fwd: Tensor, messages_back: Tensor, nodes_in_batch: int, influence_weights: Tensor):
+    def aggregate_messages(self, ht: Tensor, messages_fwd: Tensor, messages_back: Tensor, nodes_in_batch: int):
         """
         :param ht: shape m x 2
         :param messages_fwd: shape m x embed_dim
@@ -85,24 +85,16 @@ class MessagePassingLayer(nn.Module):
         device = messages_fwd.device
         msg_dst = torch.cat([ht[:, 1], ht[:, 0]])
         messages = torch.cat([messages_fwd, messages_back], dim=0)
-
-        if influence_weights is not None:
-            messages = influence_weights.view(-1, 1) * messages
-
         agg_messages = torch.zeros((nodes_in_batch, self.embed_dim), dtype=messages_fwd.dtype, device=device)
         agg_messages = torch.scatter_add(agg_messages, 0, msg_dst.reshape(-1, 1).expand(-1, self.embed_dim), messages)
-
-        if influence_weights is None:
-            num_msgs = torch.zeros((nodes_in_batch,), dtype=torch.float, device=device)
-            unique, counts = msg_dst.unique(return_counts=True)
-            num_msgs[unique] = counts.float()
-            agg_messages = agg_messages / num_msgs.reshape(-1, 1)  # take mean of messages
-        else:
-            agg_messages = agg_messages / agg_messages.sum(1).view(-1, 1)
+        num_msgs = torch.zeros((nodes_in_batch,), dtype=torch.float, device=device)
+        unique, counts = msg_dst.unique(return_counts=True)
+        num_msgs[unique] = counts.float()
+        agg_messages = agg_messages / num_msgs.reshape(-1, 1)  # take mean of messages
 
         return agg_messages
 
-    def forward(self, H: Tensor, E: Tensor, ht: Tensor, queries, influence_weights):
+    def forward(self, H: Tensor, E: Tensor, ht: Tensor, queries):
         """
         :param H: shape n x embed_dim
         :param E: shape m x embed_dim
@@ -112,7 +104,7 @@ class MessagePassingLayer(nn.Module):
         """
         messages_fwd = self.calc_messages_fwd(H, E, ht[:, 0], queries)
         messages_back = self.calc_messages_back(H, E, ht[:, 1], queries)
-        aggregated_messages = self.aggregate_messages(ht, messages_fwd, messages_back, H.shape[0], influence_weights)
+        aggregated_messages = self.aggregate_messages(ht, messages_fwd, messages_back, H.shape[0])
         out = self.norm(self.act(aggregated_messages) + H)
         return out
 
@@ -167,8 +159,7 @@ class EdgeUpdateLayer(nn.Module):
 
 
 class KGCompletionGNN(nn.Module):
-    def __init__(self, num_relations: int, relation_feat, input_dim: int, embed_dim: int, num_layers: int, edge_attention=False,
-                 relation_scoring=False):
+    def __init__(self, relation_feat, input_dim: int, embed_dim: int, num_layers: int, norm=2, edge_attention=False):
         super(KGCompletionGNN, self).__init__()
 
         local_vals = locals()
@@ -177,11 +168,15 @@ class KGCompletionGNN(nn.Module):
 
         self.embed_dim = embed_dim
         self.num_layers = num_layers
+        self.norm = norm
 
         self.relation_embedding = nn.Embedding(relation_feat.shape[0], relation_feat.shape[1])
         self.relation_embedding.weight = nn.Parameter(torch.tensor(relation_feat, dtype=torch.float))
+        self.relation_embedding.weight.requires_grad = False  # Comment to learn through message passing relation embedding table
+
         self.edge_input_transform = nn.Linear(relation_feat.shape[1], embed_dim)
-        self.relation_influence_table = nn.Parameter(torch.ones(num_relations, num_relations), requires_grad=True) if relation_scoring else None
+        self.transE_relation_embedding = nn.Embedding(relation_feat.shape[0], embed_dim)
+        self.transE_relation_embedding.weight.data.uniform_(-6 / math.sqrt(embed_dim), 6 / math.sqrt(embed_dim))
 
         self.entity_input_transform = nn.Linear(input_dim, embed_dim)
 
@@ -201,17 +196,7 @@ class KGCompletionGNN(nn.Module):
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
 
-    def compute_pairwise_relation_importance(self, queries, r_tensor):
-        query_idxs = queries.nonzero(as_tuple=False).flatten()
-        query_relation_types = r_tensor[query_idxs]
-        value_idxs = torch.roll(queries, shifts=1)
-        value_idxs[0] = 0
-        relevant_query_idxs = torch.cumsum(value_idxs, dim=0)
-        relevant_queries_relation_types = query_relation_types[relevant_query_idxs]
-        influence_weights = self.relation_influence_table[relevant_queries_relation_types, r_tensor]
-        return self.softmax(influence_weights).tile(2)
-
-    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, queries: Tensor) -> Tensor:
+    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, queries: Tensor):
         # Transform entities
         H_0 = self.act(self.entity_input_transform(entity_feat))
         H_0 = self.norm_entity(H_0)
@@ -222,13 +207,53 @@ class KGCompletionGNN(nn.Module):
         E_0 = self.act(self.edge_input_transform(r_embed))
         E_0 = self.norm_edge(E_0)
         E = E_0
-
-        # Compute pairwise relation importance from scoring table
-        influence_weights = self.compute_pairwise_relation_importance(queries, r_tensor) if self.relation_influence_table is not None else None
+        E_transE = self.transE_relation_embedding(r_tensor)
 
         for i in range(self.num_layers):
-            H = self.message_passing_layers[i](H, E, ht, queries, influence_weights)
+            H = self.message_passing_layers[i](H, E, ht, queries)
             E = self.edge_update_layers[i](H, E, ht)
 
         out = self.classify_triple(H, E, H_0, E_0, ht, queries)
-        return out
+
+        if not self.training:
+            query_idxs = queries.nonzero().flatten()
+            batch_negative_distances = -1 * TransELoss.distance(H[ht[query_idxs, 0]], E_transE[query_idxs], H[ht[query_idxs, 1]], self.norm)
+            return batch_negative_distances
+        else:
+            # Return the updated entity embeddings and relation embeddings as well as distanced for the entire batch
+            return H, E_transE, out
+
+
+class TransELoss(nn.Module):
+    def __init__(self, margin, distance_norm=2):
+        super(TransELoss, self).__init__()
+        self.margin = margin
+        self.distance_norm = distance_norm
+        self.criterion = nn.MarginRankingLoss(margin=margin)
+
+    def forward(self, H, E, ht, labels, queries, y):
+        positives = labels.nonzero(as_tuple=False).flatten()
+        negatives = (labels == 0).nonzero(as_tuple=False).flatten()
+        query_idxs = queries.nonzero().flatten()
+        ht_q = ht[query_idxs]
+        E_q = E[query_idxs]
+
+        positive_head_embeds = H[ht_q[positives, 0]]
+        positive_tail_embeds = H[ht_q[positives, 1]]
+        positive_relation_embeds = E_q[positives]
+
+        negative_head_embeds = H[ht_q[negatives, 0]]
+        negative_tail_embeds = H[ht_q[negatives, 1]]
+        negative_relation_embeds = E_q[negatives]
+
+        positive_distances = TransELoss.distance(positive_head_embeds, positive_relation_embeds, positive_tail_embeds, self.distance_norm)
+        negative_distances = TransELoss.distance(negative_head_embeds, negative_relation_embeds, negative_tail_embeds, self.distance_norm)
+
+        return self.criterion(positive_distances, negative_distances, y)
+
+    @staticmethod
+    def distance(head_embeds, relation_embeds, tail_embeds, p):
+        head_embeds = F.normalize(head_embeds, p=2, dim=1)
+        tail_embeds = F.normalize(tail_embeds, p=2, dim=1)
+        distances = torch.norm(head_embeds + relation_embeds - tail_embeds, p=p, dim=1)
+        return distances
