@@ -318,7 +318,7 @@ def main(argv):
         if FLAGS.edge_attention and FLAGS.relation_scoring:
             raise Exception("Only one of relation scoring or edge attention can be enabled!")
         if FLAGS.inference_only:
-            inference_only(grank, FLAGS.local_rank, FLAGS.model_path, world)
+            inference_only(grank, FLAGS.local_rank, world)
         else:
             train(grank, FLAGS.local_rank, world)
         dist.destroy_process_group()
