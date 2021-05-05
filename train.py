@@ -151,7 +151,8 @@ def train(global_rank, local_rank, world):
             opt.step()
             scheduler.step()
 
-        save_checkpoint(ddp_model.module, epoch+1, opt, scheduler, os.path.join(CHECKPOINT_DIR, f"{FLAGS.name}_e{epoch}.pkl"))
+        if global_rank == 0:
+            save_checkpoint(ddp_model.module, epoch+1, opt, scheduler, os.path.join(CHECKPOINT_DIR, f"{FLAGS.name}_e{epoch}.pkl"))
 
 
 def train_inner(model, train_loader, opt, dataset, device, print_output=True):
