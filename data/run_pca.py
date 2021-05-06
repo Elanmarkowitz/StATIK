@@ -15,13 +15,13 @@ def process_ent_features_pca(root_data_dir: str):
     ipca = IncrementalPCA(n_components=nc)
     print('fitting pca ....')
     for i in tqdm(range(0, ent_feat.shape[0] // chunk_size+1)):
-    	ipca.partial_fit(ent_feat[i*chunk_size : (i+1)*chunk_size])
+        ipca.partial_fit(ent_feat[i*chunk_size : (i+1)*chunk_size])
 
 
     transformed_feat = np.memmap('/data/elanmark/wikikg90m_kddcup2021/processed/pca_entity_feat.npy', dtype='float32', mode='w+', shape=(ent_feat.shape[0], nc))
     print('transforming data ....')
     for i in tqdm(range(0, ent_feat.shape[0] // chunk_size+1)):
-    	transformed_feat[i*chunk_size : (i+1)*chunk_size] = ipca.transform(ent_feat[i*chunk_size:(i+1)*chunk_size])[:, :nc]
+        transformed_feat[i*chunk_size : (i+1)*chunk_size] = ipca.transform(ent_feat[i*chunk_size:(i+1)*chunk_size])[:, :nc]
 
 
     # import IPython; IPython.embed()
