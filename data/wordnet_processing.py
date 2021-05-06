@@ -20,7 +20,7 @@ class ProcessWordNet(object):
     def __init__(self):
         # print('hello')
         # try:
-        if os.path.isdir(DATA_DIR + 'proccessed'):
+        if os.path.isdir(DATA_DIR + 'processed'):
             self.load_data()
         else:
             self.load_process_data()
@@ -52,15 +52,15 @@ class ProcessWordNet(object):
 
     @staticmethod
     def write_to_npy(np_array, filename):
-        np.save(DATA_DIR + 'proccessed/' + filename, np_array)
+        np.save(DATA_DIR + 'processed/' + filename, np_array)
 
     @staticmethod
     def load_from_npy(filename):
-        return np.load(DATA_DIR + 'proccessed/' + filename)
+        return np.load(DATA_DIR + 'processed/' + filename)
 
     def load_process_data(self):
-        if not os.path.isdir(DATA_DIR + 'proccessed'):
-            os.mkdir(DATA_DIR + 'proccessed')
+        if not os.path.isdir(DATA_DIR + 'processed'):
+            os.mkdir(DATA_DIR + 'processed')
 
         self.entity_descs, self.relation_descs = self.read_descriptions()
         self.get_entity_features()
@@ -82,10 +82,10 @@ class ProcessWordNet(object):
         self.test_hrt = np.array(self.read_triples('wordnet-mlj12-test.txt', to_replace=to_replace_dct).values)
 
 
-        with open(DATA_DIR + 'proccessed/' + 'ent2id.pkl', 'wb') as fp:
+        with open(DATA_DIR + 'processed/' + 'ent2id.pkl', 'wb') as fp:
             pickle.dump(self.entity2id, fp)
 
-        with open(DATA_DIR + 'proccessed/' + 'rel2id.pkl', 'wb') as fp:
+        with open(DATA_DIR + 'processed/' + 'rel2id.pkl', 'wb') as fp:
             pickle.dump(self.relation2id, fp)
 
         self.write_to_npy(self.train_hrt, 'train.npy')
