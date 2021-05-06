@@ -234,13 +234,14 @@ class Wiki90MEvaluationDataset(Dataset):
                 batch_h.append(_h)
                 batch_r.append(_r)
                 batch_t_candidates.append(_t_candidates)
-                t_correct_idx.append(_t_correct)
+                if _t_correct is not None:
+                    t_correct_idx.append(_t_correct)
 
             out_batch = hrt_collate(list(zip(batch_h, batch_r, batch_t_candidates)))
 
-            t_correct_idx = t_correct_idx if isinstance(self, Wiki90MValidationDataset) else None
+            t_correct_idx = np.array(t_correct_idx) if isinstance(self, Wiki90MValidationDataset) else None
 
-            return out_batch, np.array(t_correct_idx)
+            return out_batch, t_correct_idx
 
         return collate_fn
 
