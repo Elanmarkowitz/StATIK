@@ -56,7 +56,7 @@ class ProcessWordNet(object):
 
     @staticmethod
     def load_from_npy(filename):
-        return np.load(DATA_DIR + 'processed/' + filename)
+        return np.load(DATA_DIR + 'processed/' + filename, allow_pickle=True)
 
     def load_process_data(self):
         if not os.path.isdir(DATA_DIR + 'processed'):
@@ -94,14 +94,19 @@ class ProcessWordNet(object):
 
 
     def load_data(self):
-        with open('symbols2id.json', 'r') as fp:
-            self.symbols2id = json.load(fp)
-        self.entity2id = self.symbols2id['ent2id']
-        self.relation2id = self.symbols2id['rel2id']
+        with open(DATA_DIR + 'processed/ent2id.pkl', 'rb') as fp:
+            self.entity2id = pickle.load(fp)
 
-        self.train_hrt = self.load_from_npy('train_hrt.npy')
-        self.valid_hrt = self.load_from_npy('valid_hrt.npy')
-        self.test_hrt = self.load_from_npy('test_hrt.npy')
+        with open(DATA_DIR + 'processed/rel2id.pkl', 'rb') as fp:
+            self.relation2id = pickle.load(fp)
+
+        self.num_entities = len(self.entity2id.keys())
+        self.num_relations = len(self.relation2id.keys())
+
+
+        self.train_hrt = self.load_from_npy('train.npy')
+        self.valid_hrt = self.load_from_npy('valid.npy')
+        self.test_hrt = self.load_from_npy('test.npy')
 
         self.entity_feat = self.load_from_npy('entity_features.npy')
         self.relation_feat = self.load_from_npy('relation_features.npy')
