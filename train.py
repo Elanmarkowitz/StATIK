@@ -250,7 +250,7 @@ def inference_only(global_rank, local_rank, world):
     else:
         gather_sizes = [FLAGS.valid_batch_size * FLAGS.validation_batches] * num_ranks
 
-    if FLAGS.validate_only:
+    if FLAGS.validation_only:
         result = validate(eval_dataset, eval_dataloader, ddp_model, global_rank, local_rank, gather_sizes, FLAGS.validation_batches, world)
         if global_rank == 0:
             mrr = result['mrr']
