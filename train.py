@@ -138,7 +138,8 @@ def train(global_rank, local_rank, world):
 
             if (i + 1) % FLAGS.validate_every == 0:
                 ddp_model.eval()
-                result = validate(valid_dataset, valid_dataloader, ddp_model, global_rank, local_rank, num_batches=FLAGS.validation_batches,
+                gather_sizes = [FLAGS.valid_batch_size * FLAGS.validation_batches] * world.size()
+                result = validate(valid_dataset, valid_dataloader, ddp_model, global_rank, local_rank, gather_sizes, num_batches=FLAGS.validation_batches,
                                   world=world)
                 if global_rank == 0:
                     mrr = result['mrr']
