@@ -16,7 +16,7 @@ class MessageCalculationLayer(nn.Module):
         self.transform_message = nn.Linear(2 * embed_dim, embed_dim)
         self.message_weighting_function = message_weighting_function
 
-    def forward(self, H: Tensor, E: Tensor, heads: Tensor, queries: Tensor):
+    def forward(self, H: Tensor, E: Tensor, r_embed: Tensor, heads: Tensor, queries: Tensor):
         """
         :param H: shape n x embed_dim
         :param E: shape m x embed_dim
@@ -28,7 +28,7 @@ class MessageCalculationLayer(nn.Module):
         H_heads = H[heads]
         raw_messages = torch.cat([H_heads, E], dim=1)
         messages = self.transform_message(raw_messages)
-        message_weights = self.message_weighting_function(E, queries) if self.message_weighting_function is not None else None
+        message_weights = self.message_weighting_function(r_embed, queries) if self.message_weighting_function is not None else None
 
         # TODO: Maybe normalize
         return message_weights.view(-1, 1) * messages if self.message_weighting_function is not None else messages
@@ -96,7 +96,7 @@ class MessagePassingLayer(nn.Module):
 
         return agg_messages
 
-    def forward(self, H: Tensor, E: Tensor, ht: Tensor, queries):
+    def forward(self, H: Tensor, E: Tensor, r_embed: Tensor, ht: Tensor, queries):
         """
         :param H: shape n x embed_dim
         :param E: shape m x embed_dim
@@ -104,8 +104,8 @@ class MessagePassingLayer(nn.Module):
         :param r_embed: shape m x embed_dim
         :return:
         """
-        messages_fwd = self.calc_messages_fwd(H, E, ht[:, 0], queries)
-        messages_back = self.calc_messages_back(H, E, ht[:, 1], queries)
+        messages_fwd = self.calc_messages_fwd(H, E, r_embed, ht[:, 0], queries)
+        messages_back = self.calc_messages_back(H, E, r_embed, ht[:, 1], queries)
         aggregated_messages = self.aggregate_messages(ht, messages_fwd, messages_back, H.shape[0])
         out = self.norm(self.act(aggregated_messages) + H)
         return out
@@ -177,7 +177,7 @@ class KGCompletionGNN(nn.Module):
 
         self.entity_input_transform = nn.Linear(input_dim, embed_dim)
 
-        self.message_weighting_function = MessageWeightingFunction(embed_dim, embed_dim // 2) if edge_attention else None
+        self.message_weighting_function = MessageWeightingFunction(relation_feat.shape[1], embed_dim) if edge_attention else None
         self.norm_entity = nn.LayerNorm(embed_dim)
         self.norm_edge = nn.LayerNorm(embed_dim)
 
@@ -207,7 +207,7 @@ class KGCompletionGNN(nn.Module):
         E_transE = self.transE_relation_embedding(r_tensor)
 
         for i in range(self.num_layers):
-            H = self.message_passing_layers[i](H, E, ht, queries)
+            H = self.message_passing_layers[i](H, E, r_embed, ht, queries)
             E = self.edge_update_layers[i](H, E, ht)
 
         out = self.classify_triple(H, E, H_0, E_0, ht, queries)
