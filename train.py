@@ -227,7 +227,7 @@ def inference_only(global_rank, local_rank, world):
     rank_idxs = torch.arange(start_idx, end_idx, dtype=torch.long).tolist()
 
     subset = Subset(eval_dataset, rank_idxs)
-    valid_dataloader = DataLoader(subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
+    eval_dataloader = DataLoader(subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
                                    collate_fn=eval_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
 
     model = KGCompletionGNN(base_dataset.relation_feat, base_dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, edge_attention=FLAGS.edge_attention)
@@ -251,10 +251,14 @@ def inference_only(global_rank, local_rank, world):
     else:
         gather_sizes = [FLAGS.valid_batch_size * FLAGS.validation_batches] * num_ranks
 
-    result = validate(eval_dataset, valid_dataloader, ddp_model, global_rank, local_rank, gather_sizes, FLAGS.validation_batches, world)
-    if global_rank == 0:
-        mrr = result['mrr']
-        print('Validation MRR = {}'.format(mrr))
+    if FLAGS.validation_only:
+        result = validate(eval_dataset, eval_dataloader, ddp_model, global_rank, local_rank, gather_sizes, FLAGS.validation_batches, world)
+        if global_rank == 0:
+            mrr = result['mrr']
+            print('Validation MRR = {}'.format(mrr))
+    else:
+        test(eval_dataset, eval_dataloader, ddp_model, global_rank, local_rank, gather_sizes, FLAGS.validation_batches, world)
+
 
 
 def run_inference(dataset: Wiki90MEvaluationDataset, dataloader: DataLoader, model, global_rank: int, local_rank: int,
@@ -276,6 +280,8 @@ def run_inference(dataset: Wiki90MEvaluationDataset, dataloader: DataLoader, mod
                 t_corrects.append(t_correct_index)
             if num_batches and num_batches == (i + 1):
                 break
+            if i % 100 == 0:
+                dist.barrier()
 
     t_pred_top10 = torch.cat(top_10s, dim=0)
     aggregated_top10_preds = gather_results(t_pred_top10, global_rank, gather_sizes, world)
@@ -309,6 +315,7 @@ def test(test_dataset: Wiki90MTestDataset, test_dataloader: DataLoader, model, g
     input_dict = {}
     input_dict['h,r->t'] = {'t_pred_top10': top10_preds}
     evaluator.save_test_submission(input_dict=input_dict, dir_path=FLAGS.test_save_dir)
+    print(f'Results saved under {FLAGS.test_save_dir}')
 
 
 def gather_results(data: torch.Tensor, global_rank, gather_sizes, world):
