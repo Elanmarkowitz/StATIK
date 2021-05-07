@@ -312,10 +312,11 @@ def test(test_dataset: Wiki90MTestDataset, test_dataloader: DataLoader, model, g
     evaluator = WikiKG90MEvaluator()
     top10_preds, _ = run_inference(test_dataset, test_dataloader, model, global_rank, local_rank, gather_sizes,
                                    num_batches, world)
-    input_dict = {}
-    input_dict['h,r->t'] = {'t_pred_top10': top10_preds}
-    evaluator.save_test_submission(input_dict=input_dict, dir_path=FLAGS.test_save_dir)
-    print(f'Results saved under {FLAGS.test_save_dir}')
+
+    if global_rank == 0:
+        input_dict = {'h,r->t': {'t_pred_top10': top10_preds}}
+        evaluator.save_test_submission(input_dict=input_dict, dir_path=FLAGS.test_save_dir)
+        print(f'Results saved under {FLAGS.test_save_dir}')
 
 
 def gather_results(data: torch.Tensor, global_rank, gather_sizes, world):
