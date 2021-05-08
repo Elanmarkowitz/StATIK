@@ -279,16 +279,17 @@ def run_inference(dataset: Wiki90MEvaluationDataset, dataloader: DataLoader, mod
                 t_corrects.append(t_correct_index)
             if num_batches and num_batches == (i + 1):
                 break
+
             if i % 100 == 0:
-                dist.barrier()
+                dist.barrier(group=world)
 
     t_pred_top10 = torch.cat(top_10s, dim=0)
-    aggregated_top10_preds = gather_results(t_pred_top10, global_rank, gather_sizes, world)
+    aggregated_top10_preds = gather_results(t_pred_top10, global_rank, local_rank, gather_sizes, world)
 
     aggregated_correct_indices = None
     if isinstance(dataset, Wiki90MValidationDataset):
         t_correct_index = torch.cat(t_corrects, dim=0)
-        aggregated_correct_indices = gather_results(t_correct_index, global_rank, gather_sizes, world)
+        aggregated_correct_indices = gather_results(t_correct_index, global_rank, local_rank, gather_sizes, world)
 
     return aggregated_top10_preds, aggregated_correct_indices
 
@@ -311,17 +312,19 @@ def test(test_dataset: Wiki90MTestDataset, test_dataloader: DataLoader, model, g
     evaluator = WikiKG90MEvaluator()
     top10_preds, _ = run_inference(test_dataset, test_dataloader, model, global_rank, local_rank, gather_sizes,
                                    num_batches, world)
-    input_dict = {}
-    input_dict['h,r->t'] = {'t_pred_top10': top10_preds}
-    evaluator.save_test_submission(input_dict=input_dict, dir_path=FLAGS.test_save_dir)
-    print(f'Results saved under {FLAGS.test_save_dir}')
+
+    if global_rank == 0:
+        print('Saving...')
+        input_dict = {'h,r->t': {'t_pred_top10': top10_preds}}
+        evaluator.save_test_submission(input_dict=input_dict, dir_path=FLAGS.test_save_dir)
+        print(f'Results saved under {FLAGS.test_save_dir}')
 
 
-def gather_results(data: torch.Tensor, global_rank, gather_sizes, world):
+def gather_results(data: torch.Tensor, global_rank, local_rank, gather_sizes, world):
     gather_list = []
 
     for size in gather_sizes:
-        gather_list.append(torch.empty(size, *data.shape[1:], dtype=data.dtype, device=global_rank))
+        gather_list.append(torch.empty(size, *data.shape[1:], dtype=data.dtype, device=local_rank))
 
     if global_rank == 0:
         gather_list[0] = data
@@ -344,7 +347,7 @@ def main(argv):
                                 init_method="tcp://{}:{}".format(master_addr, master_port), rank=grank, world_size=ws)
 
         setproctitle.setproctitle("KGCompletionTrainer:{}".format(grank))
-        world = dist.new_group([i for i in range(ws)], backend=dist.Backend.NCCL)
+        world = dist.group.WORLD
 
         if FLAGS.edge_attention and FLAGS.relation_scoring:
             raise Exception("Only one of relation scoring or edge attention can be enabled!")
