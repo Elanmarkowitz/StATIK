@@ -2,24 +2,40 @@ from collections import defaultdict
 import os
 import numpy as np
 import array
+from typing import Union
 
 import tqdm
 from ogb.lsc import WikiKG90MDataset
 
 from data.left_contiguous_csr import LeftContiguousCSR
+from data.wordnet_processing import ProcessWordNet
 
-DATA_DIR = os.environ["DATA_DIR"] if "DATA_DIR" in os.environ else "/nas/home/elanmark/data"
-
-
-def load_original_data(root_data_dir: str) -> WikiKG90MDataset:
-    dataset = WikiKG90MDataset(root=root_data_dir)
-    return dataset
+DATA_DIR = os.environ["DATA_DIR"] if "DATA_DIR" in os.environ else "/data/elanmark"
 
 
-def process_data(root_data_dir: str) -> None:
+LEGAL_DATASETS = {
+    "wikikg90m_kddcup2021",
+    "wordnet-mlj12"
+}
+
+ProcessableDataset = Union[WikiKG90MDataset, ProcessWordNet]
+
+
+def load_original_data(root_data_dir: str, dataset_name: str) -> ProcessableDataset:
+    assert dataset_name in LEGAL_DATASETS, f'DATASET must be one of {list(LEGAL_DATASETS)}'
+
+    if dataset_name == "wikikg90m_kddcup2021":
+        return WikiKG90MDataset(root=root_data_dir)
+    elif dataset_name == "wordnet-mlj12":
+        return ProcessWordNet(root_data_dir=root_data_dir)
+    else:
+        raise Exception('Dataset not known.')
+
+
+def process_data(root_data_dir: str, dataset_name: str) -> None:
     print('Loading original data.')
-    dataset = load_original_data(root_data_dir)
-    save_dir = os.path.join(root_data_dir, "wikikg90m_kddcup2021", "processed")
+    dataset = load_original_data(root_data_dir, dataset_name)
+    save_dir = os.path.join(root_data_dir, dataset_name, "processed")
 
     # separate indices and relations
     train_hrt = dataset.train_hrt
@@ -98,10 +114,10 @@ def process_data(root_data_dir: str) -> None:
     np.save(os.path.join(save_dir, 'degrees.npy'), degrees)
 
 
-def load_processed_data(root_data_dir: str) -> WikiKG90MDataset:
-    save_dir = os.path.join(root_data_dir, "wikikg90m_kddcup2021", "processed")
+def load_processed_data(root_data_dir: str, dataset_name: str) -> WikiKG90MDataset:
+    save_dir = os.path.join(root_data_dir, dataset_name, "processed")
     print('Loading processed dataset.')
-    dataset = load_original_data(root_data_dir)
+    dataset = load_original_data(root_data_dir, dataset_name)
     dataset.degrees = np.load(os.path.join(save_dir, 'degrees.npy'))
     # dataset.train_ht_inverse = np.load(os.path.join(save_dir, 'train_ht_inverse.npy'))
     # dataset.train_r_inverse = np.load(os.path.join(save_dir, 'train_r_inverse.npy'))
