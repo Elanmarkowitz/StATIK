@@ -46,6 +46,8 @@ class ProcessWordNet(object):
 
     @staticmethod
     def read_descriptions():
+        if not os.path.isdir(DATA_DIR):
+            os.mkdir(DATA_DIR)
         if not os.path.isfile(DATA_DIR + 'wordnet-mlj12-definitions.txt'):
             ProcessWordNet.download_data()
         ent_desc = pd.read_csv(DATA_DIR + 'wordnet-mlj12-definitions.txt', names=['code', 'name', 'description'], sep='\t')
