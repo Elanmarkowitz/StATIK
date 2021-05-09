@@ -9,7 +9,7 @@ from collections import defaultdict
 import json
 from sentence_transformers import SentenceTransformer
 
-import urllib.request
+import urllib.requestw
 
 
 ROOT_DIR = '/data/mehrnoom/'
@@ -40,7 +40,7 @@ class ProcessWordNet(object):
 
     @staticmethod
     def read_triples(filename, to_replace):
-        triples = pd.read_csv(DATA_DIR + filename, names=['h', 'r', 't'])
+        triples = pd.read_csv(DATA_DIR + filename, names=['h', 'r', 't'], sep='\t').replace(to_replace)
         return triples
 
     @staticmethod
