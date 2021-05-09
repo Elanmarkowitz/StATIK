@@ -9,10 +9,10 @@ from collections import defaultdict
 import json
 from sentence_transformers import SentenceTransformer
 
-import urllib.requestw
+import urllib.request
 
 
-ROOT_DIR = '/data/mehrnoom/'
+ROOT_DIR = os.environ["DATA_DIR"] if "DATA_DIR" in os.environ else "/data/elanmark"
 DATA_DIR = ROOT_DIR + 'wordnet-mlj12/'
 
 
@@ -29,6 +29,7 @@ class ProcessWordNet(object):
 
     @staticmethod
     def download_data():
+        print('Downloading dataset.')
         url = 'https://everest.hds.utc.fr/lib/exe/fetch.php?media=en:wordnet-mlj12.tar.gz'
         with urllib.request.urlopen(url) as dl_file:
             with open(ROOT_DIR + 'wordnet.tar.gz', 'wb') as out_file:
@@ -45,6 +46,8 @@ class ProcessWordNet(object):
 
     @staticmethod
     def read_descriptions():
+        if not os.path.isfile(DATA_DIR + 'wordnet-mlj12-definitions.txt'):
+            ProcessWordNet.download_data()
         ent_desc = pd.read_csv(DATA_DIR + 'wordnet-mlj12-definitions.txt', names=['code', 'name', 'description'], sep='\t')
         rel_desc = pd.read_csv(DATA_DIR + 'wordnet-mlj12-train.txt', names=['h', 'description', 'r'], sep='\t')['description'].drop_duplicates()
         # import IPython; IPython.embed()
@@ -123,6 +126,7 @@ class ProcessWordNet(object):
         # import IPython;IPython.embed()s
 
     def get_entity_features(self):
+        print('Creating features using language model.')
         model = SentenceTransformer('stsb-distilroberta-base-v2')
         self.entity_feat = model.encode(self.entity_descs['description'].values)
         self.relation_feat = model.encode(self.relation_descs.values)
