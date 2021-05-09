@@ -46,8 +46,6 @@ class ProcessWordNet(object):
 
     @staticmethod
     def read_descriptions():
-        if not os.path.isdir(DATA_DIR):
-            os.mkdir(DATA_DIR)
         if not os.path.isfile(DATA_DIR + 'wordnet-mlj12-definitions.txt'):
             ProcessWordNet.download_data()
         ent_desc = pd.read_csv(DATA_DIR + 'wordnet-mlj12-definitions.txt', names=['code', 'name', 'description'], sep='\t')
@@ -64,6 +62,8 @@ class ProcessWordNet(object):
         return np.load(DATA_DIR + 'processed/' + filename, allow_pickle=True)
 
     def load_process_data(self):
+        if not os.path.isdir(DATA_DIR):
+            os.mkdir(DATA_DIR)
         if not os.path.isdir(DATA_DIR + 'processed'):
             os.mkdir(DATA_DIR + 'processed')
 
