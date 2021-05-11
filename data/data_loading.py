@@ -21,7 +21,7 @@ class WikiKG90MProcessedDataset(Dataset):
         if from_dataset:
             dataset = from_dataset
         else:
-            dataset = data_processing.load_processed_data(root_data_dir)
+            dataset = data_processing.load_processed_data(root_data_dir, "wikikg90m_kddcup2021")
         self.num_entities = dataset.num_entities
         self.train_ht = dataset.train_ht
         self.train_r = dataset.train_r

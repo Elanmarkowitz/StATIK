@@ -221,10 +221,11 @@ def inference_only(global_rank, local_rank, world):
         eval_dataset = Wiki90MTestDataset(base_dataset)
 
     num_ranks = world.size()
-    idxs_per_rank = len(eval_dataset) / num_ranks
+    idxs_per_rank = math.ceil(len(eval_dataset) / num_ranks)
     start_idx = global_rank * idxs_per_rank
     end_idx = (global_rank + 1) * idxs_per_rank if ((global_rank + 1) * idxs_per_rank <= len(eval_dataset)) else len(eval_dataset)
     rank_idxs = torch.arange(start_idx, end_idx, dtype=torch.long).tolist()
+    print(f"Global rank {global_rank} processing dataset from {rank_idxs[0]} through {rank_idxs[-1]}")
 
     subset = Subset(eval_dataset, rank_idxs)
     eval_dataloader = DataLoader(subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
@@ -245,7 +246,7 @@ def inference_only(global_rank, local_rank, world):
 
     if FLAGS.test_only or FLAGS.validation_batches < 0:
         FLAGS.validation_batches = None
-        gather_sizes = [math.floor(len(eval_dataset) / num_ranks)] * (num_ranks - 1)
+        gather_sizes = [math.ceil(len(eval_dataset) / num_ranks)] * (num_ranks - 1)
         last_size = len(eval_dataset) - sum(gather_sizes)
         gather_sizes.append(last_size)
     else:
@@ -258,7 +259,6 @@ def inference_only(global_rank, local_rank, world):
             print('Validation MRR = {}'.format(mrr))
     else:
         test(eval_dataset, eval_dataloader, ddp_model, global_rank, local_rank, gather_sizes, FLAGS.validation_batches, world)
-
 
 
 def run_inference(dataset: Wiki90MEvaluationDataset, dataloader: DataLoader, model, global_rank: int, local_rank: int,
@@ -331,6 +331,7 @@ def gather_results(data: torch.Tensor, global_rank, gather_sizes, world):
         for p in range(1, world.size()):
             dist.recv(gather_list[p], src=p, group=world)
     else:
+        assert data.shape == gather_list[global_rank].shape, "Gather size does not match data being sent. Check code for bug."
         dist.send(data, dst=0, group=world)
 
     return torch.cat(gather_list, dim=0)
