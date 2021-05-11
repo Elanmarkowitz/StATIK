@@ -260,30 +260,34 @@ def inference_only(global_rank, local_rank, world):
             mrr = result['mrr']
             print('Validation MRR = {}'.format(mrr))
     else:
-        test(eval_dataset, eval_dataloader, ddp_model, global_rank, local_rank, gather_sizes, FLAGS.validation_batches, world)
+        test(eval_dataset, eval_dataloader, ddp_model, global_rank, local_rank, gather_sizes, None, world)
 
 
 def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, global_rank: int, local_rank: int,
-                  gather_sizes: list, num_batches: int = None, world=None, full_preds=False):
+                  gather_sizes: list, num_batches: int = None, world=None, use_full_preds=False):
     top_10s = []
     t_corrects = []
     full_preds = []
+    filter_masks = []
     with torch.no_grad():
-        for i, (subbatches, t_correct_index) in enumerate(tqdm(dataloader)):
+        for i, (subbatches, t_correct_index, t_filter_mask) in enumerate(tqdm(dataloader)):
             preds = []
             for subbatch in subbatches:
                 subbatch = prepare_batch_for_model(subbatch, dataset.ds)
                 subbatch = move_batch_to_device(subbatch, local_rank)
                 ht_tensor, r_tensor, entity_set, entity_feat, queries, _, r_queries, r_relatives, h_or_t_sample = subbatch
                 subbatch_preds = model(ht_tensor, r_tensor, entity_feat, queries)
-                subbatch_preds = subbatch_preds.reshape(len(subbatches), -1)  # TODO: inferring number of candidates, check that this is right.
+                subbatch_preds = subbatch_preds.reshape(dataloader.batch_size, -1)  # TODO: inferring number of candidates, check that this is right.
                 preds.append(subbatch_preds)
             preds = torch.cat(preds, dim=1)
             t_pred_top10 = preds.topk(10).indices
             t_pred_top10 = t_pred_top10.detach()
             top_10s.append(t_pred_top10)
 
-            if full_preds:
+            if t_filter_mask is not None:
+                filter_masks.append(t_filter_mask)
+
+            if use_full_preds:
                 full_preds.append(preds.detach())
 
             if isinstance(dataset, KGValidationDataset):
@@ -307,14 +311,19 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
         full_preds = torch.cat(full_preds, dim=0)
         aggregated_full_preds = gather_results(full_preds, global_rank, gather_sizes, world)
 
-    return aggregated_top10_preds, aggregated_correct_indices, aggregated_full_preds
+    aggregated_filter_masks = None
+    if filter_masks:
+        filter_masks = torch.cat(filter_masks, dim=0)
+        aggregated_filter_masks = gather_results(filter_masks, global_rank, gather_sizes, world)
+
+    return aggregated_top10_preds, aggregated_correct_indices, aggregated_full_preds, aggregated_filter_masks
 
 
 def validate(valid_dataset: KGValidationDataset, valid_dataloader: DataLoader, model, global_rank: int,
              local_rank: int, gather_sizes: list, num_batches: int = None, world=None):
     evaluator = WikiKG90MEvaluator()
-    top10_preds, correct_indices, _ = run_inference(valid_dataset, valid_dataloader, model, global_rank, local_rank,
-                                                    gather_sizes, num_batches, world)
+    top10_preds, correct_indices, _, _ = run_inference(valid_dataset, valid_dataloader, model, global_rank, local_rank,
+                                                       gather_sizes, num_batches, world)
     if global_rank == 0:
         input_dict = {'h,r->t': {'t_pred_top10': top10_preds.cpu().numpy(), 't_correct_index': correct_indices.cpu().numpy()}}
         result_dict = evaluator.eval(input_dict)
@@ -326,8 +335,8 @@ def validate(valid_dataset: KGValidationDataset, valid_dataloader: DataLoader, m
 def test(test_dataset: KGTestDataset, test_dataloader: DataLoader, model, global_rank: int,
          local_rank: int, gather_sizes: list, num_batches: int = None, world=None):
     evaluator = WikiKG90MEvaluator()
-    top10_preds, _, _ = run_inference(test_dataset, test_dataloader, model, global_rank, local_rank, gather_sizes,
-                                      num_batches, world)
+    top10_preds, _, _, _ = run_inference(test_dataset, test_dataloader, model, global_rank, local_rank, gather_sizes,
+                                         num_batches, world)
 
     if global_rank == 0:
         input_dict = {'h,r->t': {'t_pred_top10': top10_preds}}
@@ -335,13 +344,15 @@ def test(test_dataset: KGTestDataset, test_dataloader: DataLoader, model, global
         print(f'Results saved under {FLAGS.test_save_dir}')
 
 
-def full_evaluation(eval_dataset: KGValidationDataset, eval_dataloader: DataLoader, model, global_rank: int,
+def full_evaluation(eval_dataset: KGEvaluationDataset, eval_dataloader: DataLoader, model, global_rank: int,
                     local_rank: int, gather_sizes: list, num_batches: int = None, world=None):
-    _, correct_indices, full_preds = run_inference(eval_dataset, eval_dataloader, model, global_rank, local_rank,
-                                                   gather_sizes, num_batches, world, full_preds=True)
+    _, correct_indices, full_preds, filter_mask = run_inference(eval_dataset, eval_dataloader, model, global_rank,
+                                                                local_rank, gather_sizes, num_batches, world,
+                                                                use_full_preds=True)
 
     if global_rank == 0:
-        results = compute_eval_stats(full_preds, correct_indices)
+        results = compute_eval_stats(full_preds, correct_indices, filter_mask=filter_mask)
+        print(results)
 
 
 def gather_results(data: torch.Tensor, global_rank, gather_sizes, world):
