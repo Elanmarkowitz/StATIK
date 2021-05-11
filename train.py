@@ -17,12 +17,15 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader, DistributedSampler, Subset
 from tqdm import tqdm
 
-from data.data_loading import load_dataset, WikiKG90MProcessedDataset, Wiki90MValidationDataset, Wiki90MEvaluationDataset, Wiki90MTestDataset
+from data.data_loading import load_dataset, KGProcessedDataset, KGValidationDataset, KGEvaluationDataset, KGTestDataset
+from evaluation import compute_eval_stats
 from model.kg_completion_gnn import KGCompletionGNN, TransELoss
 from utils import load_model, load_opt_checkpoint, save_checkpoint, save_model
 
 FLAGS = flags.FLAGS
+flags.DEFINE_string("dataset", "wikikg90m_kddcup2021", "Specifies dataset from [wikikg90m_kddcup2021, wordnet-mlj12]")
 flags.DEFINE_string("root_data_dir", "/nas/home/elanmark/data", "Root data dir for installing the ogb dataset")
+
 flags.DEFINE_bool("distributed", True, "Indicate whether to use distributed training.")
 flags.DEFINE_integer("num_workers", 0, "Number of workers for the dataloader.")
 flags.DEFINE_integer("local_rank", 0, "How frequently to print learning statistics in number of iterations") # TODO: Change description here
@@ -52,7 +55,7 @@ flags.DEFINE_string("test_save_dir", "test_submissions", "Directory to save test
 CHECKPOINT_DIR = "checkpoints"
 
 
-def prepare_batch_for_model(batch, dataset: WikiKG90MProcessedDataset, save_batch=False):
+def prepare_batch_for_model(batch, dataset: KGProcessedDataset, save_batch=False):
     ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
     if entity_feat is None:
         entity_feat = torch.from_numpy(dataset.entity_feat[entity_set]).float()
@@ -83,13 +86,13 @@ def train(global_rank, local_rank, world):
     random.seed(0)
     np.random.seed(0)
 
-    dataset = load_dataset(FLAGS.root_data_dir)
+    dataset = load_dataset(FLAGS.root_data_dir, FLAGS.dataset)
     train_sampler = DistributedSampler(dataset, rank=global_rank, shuffle=True)
     train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size,
                               num_workers=FLAGS.num_workers, sampler=train_sampler,
                               collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, sample_negs=1))
 
-    valid_dataset = Wiki90MValidationDataset(dataset)
+    valid_dataset = KGValidationDataset(dataset)
     valid_sampler = DistributedSampler(valid_dataset, rank=global_rank, shuffle=False)
     valid_dataloader = DataLoader(valid_dataset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers, sampler=valid_sampler,
                                   drop_last=True, collate_fn=valid_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
@@ -197,7 +200,7 @@ def train_inner(model, train_loader, opt, dataset, device, print_output=True):
 
 
 def train_single(device):
-    dataset = load_dataset(FLAGS.root_data_dir)
+    dataset = load_dataset(FLAGS.root_data_dir, FLAGS.dataset)
     train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size, num_workers=FLAGS.num_workers,
                               collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, sample_negs=1))
     model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers)
@@ -214,11 +217,11 @@ def inference_only(global_rank, local_rank, world):
     random.seed(0)
     np.random.seed(0)
 
-    base_dataset = load_dataset(FLAGS.root_data_dir)
+    base_dataset = load_dataset(FLAGS.root_data_dir, FLAGS.dataset)
     if FLAGS.validation_only:
-        eval_dataset = Wiki90MValidationDataset(base_dataset)
+        eval_dataset = KGValidationDataset(base_dataset)
     else:
-        eval_dataset = Wiki90MTestDataset(base_dataset)
+        eval_dataset = KGTestDataset(base_dataset)
 
     num_ranks = world.size()
     idxs_per_rank = len(eval_dataset) / num_ranks
@@ -260,22 +263,30 @@ def inference_only(global_rank, local_rank, world):
         test(eval_dataset, eval_dataloader, ddp_model, global_rank, local_rank, gather_sizes, FLAGS.validation_batches, world)
 
 
-
-def run_inference(dataset: Wiki90MEvaluationDataset, dataloader: DataLoader, model, global_rank: int, local_rank: int,
-                  gather_sizes: list, num_batches: int = None, world=None):
+def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, global_rank: int, local_rank: int,
+                  gather_sizes: list, num_batches: int = None, world=None, full_preds=False):
     top_10s = []
     t_corrects = []
+    full_preds = []
     with torch.no_grad():
-        for i, (batch, t_correct_index) in enumerate(tqdm(dataloader)):
-            batch = prepare_batch_for_model(batch, dataset.ds)
-            batch = move_batch_to_device(batch, local_rank)
-            ht_tensor, r_tensor, entity_set, entity_feat, queries, _, r_queries, r_relatives, h_or_t_sample = batch
-            preds = model(ht_tensor, r_tensor, entity_feat, queries)
-            preds = preds.reshape(-1, 1001)
+        for i, (subbatches, t_correct_index) in enumerate(tqdm(dataloader)):
+            preds = []
+            for subbatch in subbatches:
+                subbatch = prepare_batch_for_model(subbatch, dataset.ds)
+                subbatch = move_batch_to_device(subbatch, local_rank)
+                ht_tensor, r_tensor, entity_set, entity_feat, queries, _, r_queries, r_relatives, h_or_t_sample = subbatch
+                subbatch_preds = model(ht_tensor, r_tensor, entity_feat, queries)
+                subbatch_preds = subbatch_preds.reshape(len(subbatches), -1)  # TODO: inferring number of candidates, check that this is right.
+                preds.append(subbatch_preds)
+            preds = torch.cat(preds, dim=1)
             t_pred_top10 = preds.topk(10).indices
             t_pred_top10 = t_pred_top10.detach()
             top_10s.append(t_pred_top10)
-            if isinstance(dataset, Wiki90MValidationDataset):
+
+            if full_preds:
+                full_preds.append(preds.detach())
+
+            if isinstance(dataset, KGValidationDataset):
                 t_correct_index = torch.tensor(t_correct_index, device=local_rank)
                 t_corrects.append(t_correct_index)
             if num_batches and num_batches == (i + 1):
@@ -287,18 +298,23 @@ def run_inference(dataset: Wiki90MEvaluationDataset, dataloader: DataLoader, mod
     aggregated_top10_preds = gather_results(t_pred_top10, global_rank, gather_sizes, world)
 
     aggregated_correct_indices = None
-    if isinstance(dataset, Wiki90MValidationDataset):
+    if isinstance(dataset, KGValidationDataset):
         t_correct_index = torch.cat(t_corrects, dim=0)
         aggregated_correct_indices = gather_results(t_correct_index, global_rank, gather_sizes, world)
 
-    return aggregated_top10_preds, aggregated_correct_indices
+    aggregated_full_preds = None
+    if full_preds:
+        full_preds = torch.cat(full_preds, dim=0)
+        aggregated_full_preds = gather_results(full_preds, global_rank, gather_sizes, world)
+
+    return aggregated_top10_preds, aggregated_correct_indices, aggregated_full_preds
 
 
-def validate(valid_dataset: Wiki90MValidationDataset, valid_dataloader: DataLoader, model, global_rank: int,
+def validate(valid_dataset: KGValidationDataset, valid_dataloader: DataLoader, model, global_rank: int,
              local_rank: int, gather_sizes: list, num_batches: int = None, world=None):
     evaluator = WikiKG90MEvaluator()
-    top10_preds, correct_indices = run_inference(valid_dataset, valid_dataloader, model, global_rank, local_rank,
-                                                 gather_sizes, num_batches, world)
+    top10_preds, correct_indices, _ = run_inference(valid_dataset, valid_dataloader, model, global_rank, local_rank,
+                                                    gather_sizes, num_batches, world)
     if global_rank == 0:
         input_dict = {'h,r->t': {'t_pred_top10': top10_preds.cpu().numpy(), 't_correct_index': correct_indices.cpu().numpy()}}
         result_dict = evaluator.eval(input_dict)
@@ -307,16 +323,25 @@ def validate(valid_dataset: Wiki90MValidationDataset, valid_dataloader: DataLoad
         return None
 
 
-def test(test_dataset: Wiki90MTestDataset, test_dataloader: DataLoader, model, global_rank: int,
-             local_rank: int, gather_sizes: list, num_batches: int = None, world=None):
+def test(test_dataset: KGTestDataset, test_dataloader: DataLoader, model, global_rank: int,
+         local_rank: int, gather_sizes: list, num_batches: int = None, world=None):
     evaluator = WikiKG90MEvaluator()
-    top10_preds, _ = run_inference(test_dataset, test_dataloader, model, global_rank, local_rank, gather_sizes,
-                                   num_batches, world)
+    top10_preds, _, _ = run_inference(test_dataset, test_dataloader, model, global_rank, local_rank, gather_sizes,
+                                      num_batches, world)
 
     if global_rank == 0:
         input_dict = {'h,r->t': {'t_pred_top10': top10_preds}}
         evaluator.save_test_submission(input_dict=input_dict, dir_path=FLAGS.test_save_dir)
         print(f'Results saved under {FLAGS.test_save_dir}')
+
+
+def full_evaluation(eval_dataset: KGValidationDataset, eval_dataloader: DataLoader, model, global_rank: int,
+                    local_rank: int, gather_sizes: list, num_batches: int = None, world=None):
+    _, correct_indices, full_preds = run_inference(eval_dataset, eval_dataloader, model, global_rank, local_rank,
+                                                   gather_sizes, num_batches, world, full_preds=True)
+
+    if global_rank == 0:
+        results = compute_eval_stats(full_preds, correct_indices)
 
 
 def gather_results(data: torch.Tensor, global_rank, gather_sizes, world):
