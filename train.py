@@ -221,10 +221,11 @@ def inference_only(global_rank, local_rank, world):
         eval_dataset = Wiki90MTestDataset(base_dataset)
 
     num_ranks = world.size()
-    idxs_per_rank = len(eval_dataset) / num_ranks
+    idxs_per_rank = math.ceil(len(eval_dataset) / num_ranks)
     start_idx = global_rank * idxs_per_rank
     end_idx = (global_rank + 1) * idxs_per_rank if ((global_rank + 1) * idxs_per_rank <= len(eval_dataset)) else len(eval_dataset)
     rank_idxs = torch.arange(start_idx, end_idx, dtype=torch.long).tolist()
+    print(f"Global rank {global_rank} processing dataset from {rank_idxs[0]} through {rank_idxs[-1]}")
 
     subset = Subset(eval_dataset, rank_idxs)
     eval_dataloader = DataLoader(subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
@@ -245,7 +246,7 @@ def inference_only(global_rank, local_rank, world):
 
     if FLAGS.test_only or FLAGS.validation_batches < 0:
         FLAGS.validation_batches = None
-        gather_sizes = [math.floor(len(eval_dataset) / num_ranks)] * (num_ranks - 1)
+        gather_sizes = [math.ceil(len(eval_dataset) / num_ranks)] * (num_ranks - 1)
         last_size = len(eval_dataset) - sum(gather_sizes)
         gather_sizes.append(last_size)
     else:
@@ -258,7 +259,6 @@ def inference_only(global_rank, local_rank, world):
             print('Validation MRR = {}'.format(mrr))
     else:
         test(eval_dataset, eval_dataloader, ddp_model, global_rank, local_rank, gather_sizes, FLAGS.validation_batches, world)
-
 
 
 def run_inference(dataset: Wiki90MEvaluationDataset, dataloader: DataLoader, model, global_rank: int, local_rank: int,
@@ -301,6 +301,7 @@ def validate(valid_dataset: Wiki90MValidationDataset, valid_dataloader: DataLoad
     top10_preds, correct_indices = run_inference(valid_dataset, valid_dataloader, model, global_rank, local_rank,
                                                  gather_sizes, num_batches, world)
     if global_rank == 0:
+        assert len(top10_preds) == len(valid_dataset), f"Number of predictions is {len(top10_preds)}. Size of dataset is {len(valid_dataset)}"
         input_dict = {'h,r->t': {'t_pred_top10': top10_preds.cpu().numpy(), 't_correct_index': correct_indices.cpu().numpy()}}
         result_dict = evaluator.eval(input_dict)
         return result_dict
@@ -316,6 +317,7 @@ def test(test_dataset: Wiki90MTestDataset, test_dataloader: DataLoader, model, g
 
     if global_rank == 0:
         print('Saving...')
+        assert len(top10_preds) == len(test_dataset), f"Number of predictions is {len(top10_preds)}. Size of dataset is {len(test_dataset)}"
         input_dict = {'h,r->t': {'t_pred_top10': top10_preds}}
         evaluator.save_test_submission(input_dict=input_dict, dir_path=FLAGS.test_save_dir)
         print(f'Results saved under {FLAGS.test_save_dir}')
@@ -333,6 +335,7 @@ def gather_results(data: torch.Tensor, global_rank, local_rank, gather_sizes, wo
         for p in range(1, world.size()):
             dist.recv(gather_list[p], src=p, group=world)
     else:
+        assert data.shape == gather_list[global_rank].shape, "Gather size does not match data being sent. Check code for bug."
         dist.send(data, dst=0, group=world)
 
     return torch.cat(gather_list, dim=0)
