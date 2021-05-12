@@ -175,9 +175,6 @@ class KGCompletionGNN(nn.Module):
         self.relation_embedding.weight.requires_grad = False  # Comment to learn through message passing relation embedding table
 
         self.edge_input_transform = nn.Linear(relation_feat.shape[1], embed_dim)
-        self.transE_relation_embedding = nn.Embedding(relation_feat.shape[0], embed_dim)
-        self.transE_relation_embedding.weight.data.uniform_(-6 / math.sqrt(embed_dim), 6 / math.sqrt(embed_dim))
-
         self.entity_input_transform = nn.Linear(input_dim, embed_dim)
 
         self.message_weighting_function = MessageWeightingFunction(embed_dim, embed_dim // 2) if edge_attention else None
@@ -207,21 +204,37 @@ class KGCompletionGNN(nn.Module):
         E_0 = self.act(self.edge_input_transform(r_embed))
         E_0 = self.norm_edge(E_0)
         E = E_0
-        E_transE = self.transE_relation_embedding(r_tensor)
 
         for i in range(self.num_layers):
             H = self.message_passing_layers[i](H, E, ht, queries)
             E = self.edge_update_layers[i](H, E, ht)
 
         out = self.classify_triple(H, E, H_0, E_0, ht, queries)
+        return out
 
-        if not self.training:
-            query_idxs = queries.nonzero().flatten()
-            batch_negative_distances = -1 * TransELoss.distance(H[ht[query_idxs, 0]], E_transE[query_idxs], H[ht[query_idxs, 1]], self.norm)
-            return batch_negative_distances
-        else:
-            # Return the updated entity embeddings and relation embeddings as well as distanced for the entire batch
-            return H, E_transE, out
+        # if not self.training:
+        #     query_idxs = queries.nonzero().flatten()
+        #     batch_negative_distances = -1 * TransELoss.distance(H[ht[query_idxs, 0]], E_transE[query_idxs], H[ht[query_idxs, 1]], self.norm)
+        #     return batch_negative_distances
+        # else:
+        #     # Return the updated entity embeddings and relation embeddings as well as distanced for the entire batch
+        #     return H, E_transE, out
+
+
+class TripletScoringLoss(nn.Module):
+    def __init__(self, margin):
+        super(TripletScoringLoss, self).__init__()
+        self.margin = margin
+        self.criterion = nn.MarginRankingLoss(margin=margin)
+
+    def forward(self, scores, labels, y):
+        positives = labels.nonzero(as_tuple=False).flatten()
+        negatives = (labels == 0).nonzero(as_tuple=False).flatten()
+        positives_scores = scores[positives]
+        negative_scores = scores[negatives]
+        return self.criterion(positives_scores, negative_scores, y)
+
+
 
 
 class TransELoss(nn.Module):

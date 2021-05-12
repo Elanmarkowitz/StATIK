@@ -18,7 +18,7 @@ from torch.utils.data import Dataset, DataLoader, DistributedSampler, Subset
 from tqdm import tqdm
 
 from data.data_loading import load_dataset, WikiKG90MProcessedDataset, Wiki90MValidationDataset, Wiki90MEvaluationDataset, Wiki90MTestDataset
-from model.kg_completion_gnn import KGCompletionGNN, TransELoss
+from model.kg_completion_gnn import KGCompletionGNN, TransELoss, TripletScoringLoss
 from utils import load_model, load_opt_checkpoint, save_checkpoint, save_model
 
 FLAGS = flags.FLAGS
@@ -102,8 +102,8 @@ def train(global_rank, local_rank, world):
     model.to(local_rank)
 
     ddp_model = DDP(model, device_ids=[local_rank], process_group=world, find_unused_parameters=True)
-    loss_fn = TransELoss(margin=FLAGS.margin)
-    target = torch.tensor([-1], dtype=torch.long, device=local_rank)
+    loss_fn = TripletScoringLoss(margin=FLAGS.margin)
+    target = torch.tensor([1], dtype=torch.long, device=local_rank)
     opt = optim.Adam(ddp_model.parameters(), lr=FLAGS.lr)
     scheduler = optim.lr_scheduler.MultiStepLR(opt,
                                                milestones=[len(train_loader)],
@@ -122,9 +122,10 @@ def train(global_rank, local_rank, world):
             batch = prepare_batch_for_model(batch, dataset)
             batch = move_batch_to_device(batch, local_rank)
             ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
-            H, E, preds = ddp_model(ht_tensor, r_tensor, entity_feat, queries)
+            scores = ddp_model(ht_tensor, r_tensor, entity_feat, queries)
+            loss = loss_fn(scores, labels, target) + 0.5 * F.binary_cross_entropy_with_logits(scores.flatten(), labels.float())
 
-            loss = loss_fn(H, E, ht_tensor, labels, queries, target) + 0.4 * F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
+            #loss = loss_fn(H, E, ht_tensor, labels, queries, target) + 0.4 * F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
 
             moving_average_loss = .999 * moving_average_loss + 0.001 * loss.detach()
 
@@ -270,9 +271,9 @@ def run_inference(dataset: Wiki90MEvaluationDataset, dataloader: DataLoader, mod
             batch = prepare_batch_for_model(batch, dataset.ds)
             batch = move_batch_to_device(batch, local_rank)
             ht_tensor, r_tensor, entity_set, entity_feat, queries, _, r_queries, r_relatives, h_or_t_sample = batch
-            preds = model(ht_tensor, r_tensor, entity_feat, queries)
-            preds = preds.reshape(-1, 1001)
-            t_pred_top10 = preds.topk(10).indices
+            scores = model(ht_tensor, r_tensor, entity_feat, queries)
+            scores = scores.reshape(-1, 1001)
+            t_pred_top10 = scores.topk(10).indices
             t_pred_top10 = t_pred_top10.detach()
             top_10s.append(t_pred_top10)
             if isinstance(dataset, Wiki90MValidationDataset):
