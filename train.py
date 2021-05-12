@@ -301,7 +301,6 @@ def validate(valid_dataset: Wiki90MValidationDataset, valid_dataloader: DataLoad
     top10_preds, correct_indices = run_inference(valid_dataset, valid_dataloader, model, global_rank, local_rank,
                                                  gather_sizes, num_batches, world)
     if global_rank == 0:
-        assert len(top10_preds) == len(valid_dataset), f"Number of predictions is {len(top10_preds)}. Size of dataset is {len(valid_dataset)}"
         input_dict = {'h,r->t': {'t_pred_top10': top10_preds.cpu().numpy(), 't_correct_index': correct_indices.cpu().numpy()}}
         result_dict = evaluator.eval(input_dict)
         return result_dict
