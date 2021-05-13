@@ -231,17 +231,18 @@ def inference_only(global_rank, local_rank, world):
     eval_dataloader = DataLoader(subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
                                    collate_fn=eval_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
 
-    model = KGCompletionGNN(base_dataset.relation_feat, base_dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, edge_attention=FLAGS.edge_attention)
-
-    if global_rank == 0:
-        assert FLAGS.model_path_depr is not None or FLAGS.model_path is not None, 'Must be supplied with model to do inference.'
-        if FLAGS.model_path_depr is not None:
+    assert FLAGS.model_path_depr is not None or FLAGS.model_path is not None, 'Must be supplied with model to do inference.'
+    if FLAGS.model_path_depr is not None:
+        model = KGCompletionGNN(base_dataset.relation_feat, base_dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers,
+                                edge_attention=FLAGS.edge_attention)
+        if global_rank == 0:
             model.load_state_dict(torch.load(FLAGS.model_path_depr))
-        elif FLAGS.model_path is not None:
-            model = load_model(FLAGS.model_path)
-
+    elif FLAGS.model_path is not None:
+        model = load_model(FLAGS.model_path, ignore_state_dict=(global_rank != 0))
+    else:
+        raise Exception('Must be supplied with model to do inference.')
     model.to(local_rank)
-    ddp_model = DDP(model, device_ids=[local_rank])
+    ddp_model = DDP(model, device_ids=[local_rank], process_group=world)
     ddp_model.eval()
 
     if FLAGS.test_only or FLAGS.validation_batches < 0:

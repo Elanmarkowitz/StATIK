@@ -13,15 +13,17 @@ def save_model(model: KGCompletionGNN, path: str):
     torch.save(save_obj, path)
 
 
-def load_model(path: str):
-    save_obj = torch.load(path)
+def load_model(path: str, ignore_state_dict=False):
+    save_obj = torch.load(path, map_location="cpu")
     inst_sig = save_obj['arg_signature']
     inst_val = save_obj['instantiation_args']
     print("Loading model with instantiation signature:")
     for i in range(len(inst_sig)):
         print('\t' + str(inst_sig[i]) + '=' + str(inst_val[i]))
     model: KGCompletionGNN = save_obj['model_type'](*inst_val)
-    model.load_state_dict(save_obj['state_dict'])
+    if not ignore_state_dict:
+        print("Loading state dict")
+        model.load_state_dict(save_obj['state_dict'])
     return model
 
 
