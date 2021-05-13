@@ -40,7 +40,7 @@ def save_checkpoint(model: KGCompletionGNN, next_epoch, opt: torch.optim.Optimiz
 
 
 def load_opt_checkpoint(path: str, opt: torch.optim.Optimizer, scheduler: torch.optim.lr_scheduler.MultiStepLR):
-    save_obj = torch.load(path)
+    save_obj = torch.load(path, map_location="cpu")
     opt.load_state_dict(save_obj['opt_state_dict'])
     scheduler.load_state_dict(save_obj['scheduler_state_dict'])
     epoch: int = save_obj['next_epoch']
