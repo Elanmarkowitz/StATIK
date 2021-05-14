@@ -160,7 +160,7 @@ class EdgeUpdateLayer(nn.Module):
 
 
 class RelationCorrelationModel(nn.Module):
-    def __init__(self, num_relations: int, embed_dim: int, margin: float = 1.0):
+    def __init__(self, num_relations: int, embed_dim: int):
         super(RelationCorrelationModel, self).__init__()
         self.relation_correlation_embedding = nn.Embedding(num_relations, embed_dim)
         self.ht_transform = nn.Linear(embed_dim, embed_dim)
@@ -169,10 +169,7 @@ class RelationCorrelationModel(nn.Module):
         self.tt_transform = nn.Linear(embed_dim, embed_dim)
         self.correlation_weight_table = nn.Parameter(torch.ones(num_relations, num_relations).float())
         self.final_embedding = nn.Linear(2 * embed_dim, embed_dim)
-
-        self.scoring_function = nn.Linear(embed_dim, 1)
-
-        self.criterion = nn.MarginRankingLoss(margin=margin)
+        self.final_score = nn.Linear(embed_dim, 1)
 
     def forward(self, ht: Tensor, r_q: Tensor, r_tensor: Tensor, r_relative: Tensor, h_or_t_sample: Tensor,
                 queries: Tensor, num_nodes: int):
@@ -202,14 +199,7 @@ class RelationCorrelationModel(nn.Module):
 
         final_query_embedding = self.final_embedding(torch.cat([aggregated_to_query, self.relation_correlation_embedding(query_r_type)], dim=1))
 
-        return self.scoring_function(final_query_embedding)
-
-    def loss(self, scores, labels):
-        positives = labels.nonzero(as_tuple=False).flatten()
-        negatives = (labels == 0).nonzero(as_tuple=False).flatten()
-        positive_scores = scores[positives]
-        negative_scores = scores[negatives]
-        return self.criterion(positive_scores, negative_scores, torch.tensor([-1], dtype=torch.long, device=positive_scores.device))
+        return self.final_score(final_query_embedding)
 
 
 class KGCompletionGNN(nn.Module):
@@ -244,10 +234,12 @@ class KGCompletionGNN(nn.Module):
             self.message_passing_layers.append(MessagePassingLayer(embed_dim, message_weighting_function=self.message_weighting_function))
             self.edge_update_layers.append(EdgeUpdateLayer(embed_dim))
 
+        self.relation_correlation_model = RelationCorrelationModel(relation_feat.shape[0], embed_dim)
+
         self.decoder = decoder
         if self.decoder in ["MLP", "MLP+TransE"]:
             self.classify_triple = TripleClassificationLayer(embed_dim)
-        if self.decoder in ["TransE", "MLP+TransE"]:
+        if self.decoder in ["TransE", "MLP+TransE", "RelCorr+TransE"]:
             self.transE_decoder = TransEDecoder(relation_feat.shape[0], embed_dim)
 
         self.act = nn.LeakyReLU()
@@ -255,7 +247,7 @@ class KGCompletionGNN(nn.Module):
 
     def forward(self, ht: Tensor, r_tensor: Tensor, r_query: Tensor, entity_feat: Tensor, r_relative, h_or_t_sample, queries: Tensor):
         # Transform entities
-        return self.relation_correlation_model(ht, r_query, r_tensor, r_relative, h_or_t_sample, queries, entity_feat.shape[0])
+        rel_corr_score = self.relation_correlation_model(ht, r_query, r_tensor, r_relative, h_or_t_sample, queries, entity_feat.shape[0])
 
         H_0 = self.act(self.entity_input_transform(entity_feat))
         H_0 = self.norm_entity(H_0)
@@ -276,9 +268,15 @@ class KGCompletionGNN(nn.Module):
         elif self.decoder == "TransE":
             out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
         elif self.decoder == "MLP+TransE":
-            mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries)
+            if self.training:
+                mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
+                transe_out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
+                out = (mlp_out.flatten(), transe_out)
+            else:
+                out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
+        elif self.decoder == "RelCorr+TransE":
             transe_out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
-            out = (mlp_out.flatten(), transe_out)
+            out = rel_corr_score.flatten() + transe_out
         else:
             out = None
             Exception('Decoder not valid.')
@@ -294,6 +292,9 @@ class KGCompletionGNN(nn.Module):
         elif self.decoder == "MLP+TransE":
             self.margin = margin
             return self.combo_loss
+        elif self.decoder == "RelCorr+TransE":
+            self.margin = margin
+            return self.margin_ranking_loss
 
     def margin_ranking_loss(self, scores, labels):
         distances = -1 * scores

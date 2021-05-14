@@ -123,7 +123,7 @@ def train(global_rank, local_rank, world):
             batch = prepare_batch_for_model(batch, dataset)
             batch = move_batch_to_device(batch, local_rank)
             ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
-            scores = ddp_model(ht_tensor, r_tensor, entity_feat, queries)
+            scores = ddp_model(ht_tensor, r_tensor, r_queries, entity_feat, r_relatives, h_or_t_sample, queries)
 
             loss = loss_fn(scores, labels.float())
 
@@ -272,7 +272,7 @@ def run_inference(dataset: Wiki90MEvaluationDataset, dataloader: DataLoader, mod
             batch = prepare_batch_for_model(batch, dataset.ds)
             batch = move_batch_to_device(batch, local_rank)
             ht_tensor, r_tensor, entity_set, entity_feat, queries, _, r_queries, r_relatives, h_or_t_sample = batch
-            preds = -1 * model(ht_tensor, r_tensor, r_queries, entity_feat, r_relatives, h_or_t_sample, queries)
+            preds = model(ht_tensor, r_tensor, r_queries, entity_feat, r_relatives, h_or_t_sample, queries)
             preds = preds.reshape(-1, 1001)
             t_pred_top10 = preds.topk(10).indices
             t_pred_top10 = t_pred_top10.detach()
