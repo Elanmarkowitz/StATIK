@@ -21,7 +21,7 @@ class WikiKG90MProcessedDataset(Dataset):
         if from_dataset:
             dataset = from_dataset
         else:
-            dataset = data_processing.load_processed_data(root_data_dir)
+            dataset = data_processing.load_processed_data(root_data_dir, "wikikg90m_kddcup2021")
         self.num_entities = dataset.num_entities
         self.train_ht = dataset.train_ht
         self.train_r = dataset.train_r
@@ -234,13 +234,14 @@ class Wiki90MEvaluationDataset(Dataset):
                 batch_h.append(_h)
                 batch_r.append(_r)
                 batch_t_candidates.append(_t_candidates)
-                t_correct_idx.append(_t_correct)
+                if _t_correct is not None:
+                    t_correct_idx.append(_t_correct)
 
             out_batch = hrt_collate(list(zip(batch_h, batch_r, batch_t_candidates)))
 
-            t_correct_idx = t_correct_idx if isinstance(self, Wiki90MValidationDataset) else None
+            t_correct_idx = np.array(t_correct_idx) if isinstance(self, Wiki90MValidationDataset) else None
 
-            return out_batch, np.array(t_correct_idx)
+            return out_batch, t_correct_idx
 
         return collate_fn
 

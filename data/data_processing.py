@@ -2,24 +2,50 @@ from collections import defaultdict
 import os
 import numpy as np
 import array
+from typing import Union
 
 import tqdm
 from ogb.lsc import WikiKG90MDataset
 
 from data.left_contiguous_csr import LeftContiguousCSR
+from data.wordnet_processing import ProcessWordNet
 
-DATA_DIR = os.environ["DATA_DIR"] if "DATA_DIR" in os.environ else "/nas/home/elanmark/data"
-
-
-def load_original_data(root_data_dir: str) -> WikiKG90MDataset:
-    dataset = WikiKG90MDataset(root=root_data_dir)
-    return dataset
+DATA_DIR = os.environ["DATA_DIR"] if "DATA_DIR" in os.environ else "/data/elanmark"
 
 
-def process_data(root_data_dir: str) -> None:
+LEGAL_DATASETS = {
+    "wikikg90m_kddcup2021",
+    "wordnet-mlj12"
+}
+
+ProcessableDataset = Union[WikiKG90MDataset, ProcessWordNet]
+
+
+def load_original_data(root_data_dir: str, dataset_name: str) -> ProcessableDataset:
+    assert dataset_name in LEGAL_DATASETS, f'DATASET must be one of {list(LEGAL_DATASETS)}'
+
+    if dataset_name == "wikikg90m_kddcup2021":
+        return WikiKG90MDataset(root=root_data_dir)
+    elif dataset_name == "wordnet-mlj12":
+        return ProcessWordNet(root_data_dir=root_data_dir)
+    else:
+        raise Exception('Dataset not known.')
+
+def get_filtered_candidate(queries, true_triples, num_entities):
+    candidates = np.tile(np.arange(0, num_entities), queries.shape[0])
+    A = np.append(np.repeat(queries, num_entities, axis=0), candidates[:, np.newaxis], axis=1)
+    dt = np.dtype((np.void, A.dtype.itemsize * A.shape[1]))
+    # import IPython; IPython.embed()
+    idx = np.nonzero(np.in1d(A.view(dt).reshape(-1), np.ascontiguousarray(true_triples).view(dt).reshape(-1)))[0]
+    candidates[idx] = -1
+    return candidates
+
+
+
+def process_data(root_data_dir: str, dataset_name: str) -> None:
     print('Loading original data.')
-    dataset = load_original_data(root_data_dir)
-    save_dir = os.path.join(root_data_dir, "wikikg90m_kddcup2021", "processed")
+    dataset = load_original_data(root_data_dir, dataset_name)
+    save_dir = os.path.join(root_data_dir, dataset_name, "processed")
 
     # separate indices and relations
     train_hrt = dataset.train_hrt
@@ -97,11 +123,36 @@ def process_data(root_data_dir: str) -> None:
     #     pickle.dump(relation_dict, f)
     np.save(os.path.join(save_dir, 'degrees.npy'), degrees)
 
+    total = np.concatenate((dataset.train_hrt,
+        dataset.valid_hrt,
+        dataset.test_hrt), axis=0
+        )
+    if hasattr(dataset, 'valid_hrt'):
+        num_valid = dataset.valid_hrt[:, [0, 1]].shape[0]
+        valid_cand = np.tile(np.arange(0, dataset.num_entities), num_valid)
+        filtered_cand = get_filtered_candidate(dataset.valid_hrt[:, [0, 1]], total, dataset.num_entities)
+        valid_task = {'h,r->t': {
+            'hr': dataset.valid_hrt[:, [0, 1]],
+            't_candidate': valid_cand.reshape((num_valid, dataset.num_entities)),  # this needs to be repeated for each validation triple shape: (num valid, num_entities)
+            't_candidate_filter_mask': filtered_cand.reshape((num_valid, dataset.num_entities)),
+            't_correct': dataset.valid_hrt[:, 2]
+        }}
+    if hasattr(dataset, 'test_hrt'):
+        num_test = dataset.test_hrt[:, [0, 1]].shape[0]
+        test_cand = np.tile(np.arange(0, dataset.num_entities), num_test)
+        filtered_cand = get_filtered_candidate(dataset.test_hrt[:, [0, 1]], total, dataset.num_entities)
+        test_task = {'h,r->t': {
+            'hr': dataset.test_hrt[:, [0, 1]],
+            't_candidate': test_cand.reshape((num_test, dataset.num_entities)),
+            't_candidate_filter_mask': filtered_cand.reshape((num_test, dataset.num_entities)),
+            't_correct': dataset.test_hrt[:, 2]
+        }}
 
-def load_processed_data(root_data_dir: str) -> WikiKG90MDataset:
-    save_dir = os.path.join(root_data_dir, "wikikg90m_kddcup2021", "processed")
+
+def load_processed_data(root_data_dir: str, dataset_name: str) -> WikiKG90MDataset:
+    save_dir = os.path.join(root_data_dir, dataset_name, "processed")
     print('Loading processed dataset.')
-    dataset = load_original_data(root_data_dir)
+    dataset = load_original_data(root_data_dir, dataset_name)
     dataset.degrees = np.load(os.path.join(save_dir, 'degrees.npy'))
     # dataset.train_ht_inverse = np.load(os.path.join(save_dir, 'train_ht_inverse.npy'))
     # dataset.train_r_inverse = np.load(os.path.join(save_dir, 'train_r_inverse.npy'))
