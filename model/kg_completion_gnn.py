@@ -74,7 +74,8 @@ class MessagePassingLayer(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
         self.act = nn.LeakyReLU()
 
-    def aggregate_messages(self, ht: Tensor, messages_fwd: Tensor, messages_back: Tensor, nodes_in_batch: int):
+    @staticmethod
+    def aggregate_messages(ht: Tensor, messages_fwd: Tensor, messages_back: Tensor, nodes_in_batch: int):
         """
         :param ht: shape m x 2
         :param messages_fwd: shape m x embed_dim
@@ -85,8 +86,8 @@ class MessagePassingLayer(nn.Module):
         device = messages_fwd.device
         msg_dst = torch.cat([ht[:, 1], ht[:, 0]])
         messages = torch.cat([messages_fwd, messages_back], dim=0)
-        agg_messages = torch.zeros((nodes_in_batch, self.embed_dim), dtype=messages_fwd.dtype, device=device)
-        agg_messages = torch.scatter_add(agg_messages, 0, msg_dst.reshape(-1, 1).expand(-1, self.embed_dim), messages)
+        agg_messages = torch.zeros((nodes_in_batch, messages_fwd.shape[1]), dtype=messages_fwd.dtype, device=device)
+        agg_messages = torch.scatter_add(agg_messages, 0, msg_dst.reshape(-1, 1).expand(-1, messages_fwd.shape[1]), messages)
         num_msgs = torch.zeros((nodes_in_batch,), dtype=torch.float, device=device)
         unique, counts = msg_dst.unique(return_counts=True)
         num_msgs[unique] = counts.float()
@@ -158,6 +159,59 @@ class EdgeUpdateLayer(nn.Module):
         return out
 
 
+class RelationCorrelationModel(nn.Module):
+    def __init__(self, num_relations: int, embed_dim: int, margin: float = 1.0):
+        super(RelationCorrelationModel, self).__init__()
+        self.relation_correlation_embedding = nn.Embedding(num_relations, embed_dim)
+        self.ht_transform = nn.Linear(embed_dim, embed_dim)
+        self.hh_transform = nn.Linear(embed_dim, embed_dim)
+        self.th_transform = nn.Linear(embed_dim, embed_dim)
+        self.tt_transform = nn.Linear(embed_dim, embed_dim)
+        self.correlation_weight_table = nn.Parameter(torch.ones(num_relations, num_relations).float())
+        self.final_embedding = nn.Linear(2 * embed_dim, embed_dim)
+
+        self.scoring_function = nn.Linear(embed_dim, 1)
+
+        self.criterion = nn.MarginRankingLoss(margin=margin)
+
+    def forward(self, ht: Tensor, r_q: Tensor, r_tensor: Tensor, r_relative: Tensor, h_or_t_sample: Tensor,
+                queries: Tensor, num_nodes: int):
+        r_corr_embed = self.relation_correlation_embedding(r_tensor)
+        r_corr_embed = r_corr_embed * torch.sigmoid(self.correlation_weight_table[r_tensor, r_q]).view(-1, 1)
+
+        # compute the relation embedding for all topologies
+        hh_embed = self.hh_transform(r_corr_embed)
+        ht_embed = self.ht_transform(r_corr_embed)
+        th_embed = self.th_transform(r_corr_embed)
+        tt_embed = self.tt_transform(r_corr_embed)
+        all_embed = torch.stack([torch.stack([tt_embed, th_embed]), torch.stack([ht_embed, hh_embed])])
+
+        # select the topology present
+        selected_embed = all_embed[r_relative, h_or_t_sample, torch.arange(r_relative.shape[0])]
+
+        # query relationship does not pass information
+        selected_embed = selected_embed * torch.logical_not(queries).float().view(-1,1)
+
+        aggregated_to_nodes = MessagePassingLayer.aggregate_messages(ht, selected_embed, selected_embed, num_nodes)
+
+        query_idx = queries.nonzero().flatten()
+        query_entities = ht[query_idx]
+        query_r_type = r_tensor[query_idx]
+
+        aggregated_to_query = aggregated_to_nodes[query_entities[:,0]] + aggregated_to_nodes[query_entities[:,1]]
+
+        final_query_embedding = self.final_embedding(torch.cat([aggregated_to_query, self.relation_correlation_embedding(query_r_type)], dim=1))
+
+        return self.scoring_function(final_query_embedding)
+
+    def loss(self, scores, labels):
+        positives = labels.nonzero(as_tuple=False).flatten()
+        negatives = (labels == 0).nonzero(as_tuple=False).flatten()
+        positive_scores = scores[positives]
+        negative_scores = scores[negatives]
+        return self.criterion(positive_scores, negative_scores, torch.tensor([-1], dtype=torch.long, device=positive_scores.device))
+
+
 class KGCompletionGNN(nn.Module):
     def __init__(self, relation_feat, input_dim: int, embed_dim: int, num_layers: int, norm=2, edge_attention=False,
                  decoder: str = "MLP+TransE"):
@@ -199,8 +253,10 @@ class KGCompletionGNN(nn.Module):
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
 
-    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, queries: Tensor):
+    def forward(self, ht: Tensor, r_tensor: Tensor, r_query: Tensor, entity_feat: Tensor, r_relative, h_or_t_sample, queries: Tensor):
         # Transform entities
+        return self.relation_correlation_model(ht, r_query, r_tensor, r_relative, h_or_t_sample, queries, entity_feat.shape[0])
+
         H_0 = self.act(self.entity_input_transform(entity_feat))
         H_0 = self.norm_entity(H_0)
         H = H_0
