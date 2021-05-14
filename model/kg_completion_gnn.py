@@ -159,7 +159,8 @@ class EdgeUpdateLayer(nn.Module):
 
 
 class KGCompletionGNN(nn.Module):
-    def __init__(self, relation_feat, input_dim: int, embed_dim: int, num_layers: int, norm=2, edge_attention=False):
+    def __init__(self, relation_feat, input_dim: int, embed_dim: int, num_layers: int, norm=2, edge_attention=False,
+                 decoder: str = "MLP+TransE"):
         super(KGCompletionGNN, self).__init__()
 
         local_vals = locals()
@@ -175,8 +176,6 @@ class KGCompletionGNN(nn.Module):
         self.relation_embedding.weight.requires_grad = False  # Comment to learn through message passing relation embedding table
 
         self.edge_input_transform = nn.Linear(relation_feat.shape[1], embed_dim)
-        self.transE_relation_embedding = nn.Embedding(relation_feat.shape[0], embed_dim)
-        self.transE_relation_embedding.weight.data.uniform_(-6 / math.sqrt(embed_dim), 6 / math.sqrt(embed_dim))
 
         self.entity_input_transform = nn.Linear(input_dim, embed_dim)
 
@@ -191,7 +190,11 @@ class KGCompletionGNN(nn.Module):
             self.message_passing_layers.append(MessagePassingLayer(embed_dim, message_weighting_function=self.message_weighting_function))
             self.edge_update_layers.append(EdgeUpdateLayer(embed_dim))
 
-        self.classify_triple = TripleClassificationLayer(embed_dim)
+        self.decoder = decoder
+        if self.decoder in ["MLP", "MLP+TransE"]:
+            self.classify_triple = TripleClassificationLayer(embed_dim)
+        if self.decoder in ["TransE", "MLP+TransE"]:
+            self.transE_decoder = TransEDecoder(relation_feat.shape[0], embed_dim)
 
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
@@ -207,49 +210,71 @@ class KGCompletionGNN(nn.Module):
         E_0 = self.act(self.edge_input_transform(r_embed))
         E_0 = self.norm_edge(E_0)
         E = E_0
-        E_transE = self.transE_relation_embedding(r_tensor)
 
         for i in range(self.num_layers):
             H = self.message_passing_layers[i](H, E, ht, queries)
             E = self.edge_update_layers[i](H, E, ht)
 
-        out = self.classify_triple(H, E, H_0, E_0, ht, queries)
-
-        if not self.training:
-            query_idxs = queries.nonzero().flatten()
-            batch_negative_distances = -1 * TransELoss.distance(H[ht[query_idxs, 0]], E_transE[query_idxs], H[ht[query_idxs, 1]], self.norm)
-            return batch_negative_distances
+        if self.decoder == "MLP":
+            out = self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
+        elif self.decoder == "TransE":
+            out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
+        elif self.decoder == "MLP+TransE":
+            mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries)
+            transe_out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
+            out = (mlp_out.flatten(), transe_out)
         else:
-            # Return the updated entity embeddings and relation embeddings as well as distanced for the entire batch
-            return H, E_transE, out
+            out = None
+            Exception('Decoder not valid.')
 
+        return out
 
-class TransELoss(nn.Module):
-    def __init__(self, margin, distance_norm=2):
-        super(TransELoss, self).__init__()
-        self.margin = margin
-        self.distance_norm = distance_norm
-        self.criterion = nn.MarginRankingLoss(margin=margin)
+    def get_loss_fn(self, margin=1.0):
+        if self.decoder == "MLP":
+            return nn.BCEWithLogitsLoss()
+        elif self.decoder == "TransE":
+            self.margin = margin
+            return self.margin_ranking_loss
+        elif self.decoder == "MLP+TransE":
+            self.margin = margin
+            return self.combo_loss
 
-    def forward(self, H, E, ht, labels, queries, y):
+    def margin_ranking_loss(self, scores, labels):
+        distances = -1 * scores
         positives = labels.nonzero(as_tuple=False).flatten()
         negatives = (labels == 0).nonzero(as_tuple=False).flatten()
+        pos_distances = distances[positives]
+        neg_distances = distances[negatives]
+        target = torch.tensor([-1], dtype=torch.long, device=scores.device)
+        return F.margin_ranking_loss(pos_distances, neg_distances, target, margin=self.margin)
+
+    def combo_loss(self, scores, labels):
+        mlp_scores = scores[0]
+        transe_scores = scores[1]
+        bce_loss = F.binary_cross_entropy_with_logits(mlp_scores, labels)
+        transe_loss = self.margin_ranking_loss(transe_scores, labels)
+        return transe_loss + 0.4 * bce_loss
+
+
+class TransEDecoder(nn.Module):
+    def __init__(self, num_relations: int, embed_dim: int, distance_norm: int = 2):
+        super(TransEDecoder, self).__init__()
+        self.distance_norm = distance_norm
+        self.relation_vector = nn.Embedding(num_relations, embed_dim)
+        self.relation_vector.weight.data.uniform_(-6 / math.sqrt(embed_dim), 6 / math.sqrt(embed_dim))
+
+    def forward(self, H, r_tensor, ht, queries):
         query_idxs = queries.nonzero().flatten()
         ht_q = ht[query_idxs]
-        E_q = E[query_idxs]
+        r_q = r_tensor[query_idxs]
 
-        positive_head_embeds = H[ht_q[positives, 0]]
-        positive_tail_embeds = H[ht_q[positives, 1]]
-        positive_relation_embeds = E_q[positives]
+        head_embeds = H[ht_q[:, 0]]
+        relation_embeds = self.relation_vector(r_q)
+        tail_embeds = H[ht_q[:, 1]]
 
-        negative_head_embeds = H[ht_q[negatives, 0]]
-        negative_tail_embeds = H[ht_q[negatives, 1]]
-        negative_relation_embeds = E_q[negatives]
+        distances = self.distance(head_embeds, relation_embeds, tail_embeds, self.distance_norm)
 
-        positive_distances = TransELoss.distance(positive_head_embeds, positive_relation_embeds, positive_tail_embeds, self.distance_norm)
-        negative_distances = TransELoss.distance(negative_head_embeds, negative_relation_embeds, negative_tail_embeds, self.distance_norm)
-
-        return self.criterion(positive_distances, negative_distances, y)
+        return distances
 
     @staticmethod
     def distance(head_embeds, relation_embeds, tail_embeds, p):
