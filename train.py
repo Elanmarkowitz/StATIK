@@ -18,7 +18,7 @@ from torch.utils.data import Dataset, DataLoader, DistributedSampler, Subset
 from tqdm import tqdm
 
 from data.data_loading import load_dataset, WikiKG90MProcessedDataset, Wiki90MValidationDataset, Wiki90MEvaluationDataset, Wiki90MTestDataset
-from model.kg_completion_gnn import KGCompletionGNN, TransELoss
+from model.kg_completion_gnn import KGCompletionGNN
 from utils import load_model, load_opt_checkpoint, save_checkpoint, save_model
 
 FLAGS = flags.FLAGS
@@ -42,6 +42,7 @@ flags.DEFINE_integer("validation_batches", 1000, "Number of batches to do for ea
 flags.DEFINE_integer("valid_batch_size", 1, "Batch size for validation (does all t_candidates at once).")
 flags.DEFINE_integer("epochs", 1, "Num epochs to train for")
 flags.DEFINE_float("margin", 1.0, "Margin in transE loss")
+flags.DEFINE_string("decoder", "MLP+TransE", "Choose decoder from [MLP, TransE, MLP+TransE]")
 
 flags.DEFINE_bool('validation_only', False, 'Whether or not to do a complete inference run across the validation set')
 flags.DEFINE_bool('test_only', False, 'Whether or not to do a complete inference run across the test set')
@@ -97,13 +98,13 @@ def train(global_rank, local_rank, world):
     if FLAGS.checkpoint is not None:
         model = load_model(os.path.join(CHECKPOINT_DIR, FLAGS.checkpoint), ignore_state_dict=(global_rank != 0))
     else:
-        model = KGCompletionGNN(dataset.relation_feat, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, edge_attention=FLAGS.edge_attention)
+        model = KGCompletionGNN(dataset.relation_feat, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers,
+                                edge_attention=FLAGS.edge_attention, decoder=FLAGS.decoder)
 
     model.to(local_rank)
 
     ddp_model = DDP(model, device_ids=[local_rank], process_group=world, find_unused_parameters=True)
-    loss_fn = TransELoss(margin=FLAGS.margin)
-    target = torch.tensor([-1], dtype=torch.long, device=local_rank)
+    loss_fn = model.get_loss_fn(margin=FLAGS.margin)
     opt = optim.Adam(ddp_model.parameters(), lr=FLAGS.lr)
     scheduler = optim.lr_scheduler.MultiStepLR(opt,
                                                milestones=[len(train_loader)],
@@ -122,9 +123,9 @@ def train(global_rank, local_rank, world):
             batch = prepare_batch_for_model(batch, dataset)
             batch = move_batch_to_device(batch, local_rank)
             ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
-            H, E, preds = ddp_model(ht_tensor, r_tensor, entity_feat, queries)
+            scores = ddp_model(ht_tensor, r_tensor, entity_feat, queries)
 
-            loss = loss_fn(H, E, ht_tensor, labels, queries, target) + 0.4 * F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
+            loss = loss_fn(scores, labels.float())
 
             moving_average_loss = .999 * moving_average_loss + 0.001 * loss.detach()
 
@@ -234,7 +235,7 @@ def inference_only(global_rank, local_rank, world):
     assert FLAGS.model_path_depr is not None or FLAGS.model_path is not None, 'Must be supplied with model to do inference.'
     if FLAGS.model_path_depr is not None:
         model = KGCompletionGNN(base_dataset.relation_feat, base_dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers,
-                                edge_attention=FLAGS.edge_attention)
+                                edge_attention=FLAGS.edge_attention, decoder=FLAGS.decoder)
         if global_rank == 0:
             model.load_state_dict(torch.load(FLAGS.model_path_depr))
     elif FLAGS.model_path is not None:
