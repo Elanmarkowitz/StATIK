@@ -178,6 +178,8 @@ class KGCompletionGNN(nn.Module):
         self.transE_relation_embedding = nn.Embedding(relation_feat.shape[0], embed_dim)
         self.transE_relation_embedding.weight.data.uniform_(-6 / math.sqrt(embed_dim), 6 / math.sqrt(embed_dim))
 
+        self.relative_direction_embedding = nn.Embedding(2, embed_dim)
+
         self.entity_input_transform = nn.Linear(input_dim, embed_dim)
 
         self.message_weighting_function = MessageWeightingFunction(relation_feat.shape[1], embed_dim) if edge_attention else None
@@ -196,7 +198,7 @@ class KGCompletionGNN(nn.Module):
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
 
-    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, queries: Tensor):
+    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, queries: Tensor, r_relatives: Tensor):
         # Transform entities
         H_0 = self.act(self.entity_input_transform(entity_feat))
         H_0 = self.norm_entity(H_0)
@@ -204,9 +206,10 @@ class KGCompletionGNN(nn.Module):
 
         # Transform relations
         r_embed = self.relation_embedding(r_tensor)
+        r_direction_embed = self.relative_direction_embedding(r_relatives)
         E_0 = self.act(self.edge_input_transform(r_embed))
         E_0 = self.norm_edge(E_0)
-        E = E_0
+        E = E_0 + r_direction_embed
         E_transE = self.transE_relation_embedding(r_tensor)
 
         for i in range(self.num_layers):
