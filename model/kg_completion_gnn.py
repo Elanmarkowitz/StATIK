@@ -220,9 +220,12 @@ class KGCompletionGNN(nn.Module):
         elif self.decoder == "TransE":
             out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
         elif self.decoder == "MLP+TransE":
-            mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries)
-            transe_out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
-            out = (mlp_out.flatten(), transe_out)
+            if self.training:
+                mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries)
+                transe_out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
+                out = (mlp_out.flatten(), transe_out)
+            else:
+                out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
         else:
             out = None
             Exception('Decoder not valid.')
