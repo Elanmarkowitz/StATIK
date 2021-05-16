@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from data.data_loading import load_dataset, KGProcessedDataset, KGValidationDataset, KGEvaluationDataset, KGTestDataset
 from evaluation import compute_eval_stats
-from model.kg_completion_gnn import KGCompletionGNN, TransELoss
+from model.kg_completion_gnn import KGCompletionGNN
 from utils import load_model, load_opt_checkpoint, save_checkpoint, save_model
 
 FLAGS = flags.FLAGS
@@ -45,6 +45,7 @@ flags.DEFINE_integer("validation_batches", 1000, "Number of batches to do for ea
 flags.DEFINE_integer("valid_batch_size", 1, "Batch size for validation (does all t_candidates at once).")
 flags.DEFINE_integer("epochs", 1, "Num epochs to train for")
 flags.DEFINE_float("margin", 1.0, "Margin in transE loss")
+flags.DEFINE_string("decoder", "MLP+TransE", "Choose decoder from [MLP, TransE, MLP+TransE]")
 
 flags.DEFINE_bool('validation_only', False, 'Whether or not to do a complete inference run across the validation set')
 flags.DEFINE_bool('test_only', False, 'Whether or not to do a complete inference run across the test set')
@@ -98,15 +99,15 @@ def train(global_rank, local_rank, world):
                                   drop_last=True, collate_fn=valid_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
 
     if FLAGS.checkpoint is not None:
-        model = load_model(os.path.join(CHECKPOINT_DIR, FLAGS.checkpoint))
+        model = load_model(os.path.join(CHECKPOINT_DIR, FLAGS.checkpoint), ignore_state_dict=(global_rank != 0))
     else:
-        model = KGCompletionGNN(dataset.relation_feat, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, edge_attention=FLAGS.edge_attention)
+        model = KGCompletionGNN(dataset.relation_feat, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers,
+                                edge_attention=FLAGS.edge_attention, decoder=FLAGS.decoder)
 
     model.to(local_rank)
 
     ddp_model = DDP(model, device_ids=[local_rank], process_group=world, find_unused_parameters=True)
-    loss_fn = TransELoss(margin=FLAGS.margin)
-    target = torch.tensor([-1], dtype=torch.long, device=local_rank)
+    loss_fn = model.get_loss_fn(margin=FLAGS.margin)
     opt = optim.Adam(ddp_model.parameters(), lr=FLAGS.lr)
     scheduler = optim.lr_scheduler.MultiStepLR(opt,
                                                milestones=[len(train_loader)],
@@ -125,9 +126,9 @@ def train(global_rank, local_rank, world):
             batch = prepare_batch_for_model(batch, dataset)
             batch = move_batch_to_device(batch, local_rank)
             ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
-            H, E, preds = ddp_model(ht_tensor, r_tensor, entity_feat, queries)
+            scores = ddp_model(ht_tensor, r_tensor, entity_feat, queries)
 
-            loss = loss_fn(H, E, ht_tensor, labels, queries, target) + 0.4 * F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
+            loss = loss_fn(scores, labels.float())
 
             moving_average_loss = .999 * moving_average_loss + 0.001 * loss.detach()
 
@@ -224,31 +225,33 @@ def inference_only(global_rank, local_rank, world):
         eval_dataset = KGTestDataset(base_dataset)
 
     num_ranks = world.size()
-    idxs_per_rank = len(eval_dataset) / num_ranks
+    idxs_per_rank = math.ceil(len(eval_dataset) / num_ranks)
     start_idx = global_rank * idxs_per_rank
     end_idx = (global_rank + 1) * idxs_per_rank if ((global_rank + 1) * idxs_per_rank <= len(eval_dataset)) else len(eval_dataset)
     rank_idxs = torch.arange(start_idx, end_idx, dtype=torch.long).tolist()
+    print(f"Global rank {global_rank} processing dataset from {rank_idxs[0]} through {rank_idxs[-1]}")
 
     subset = Subset(eval_dataset, rank_idxs)
     eval_dataloader = DataLoader(subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
                                    collate_fn=eval_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
 
-    model = KGCompletionGNN(base_dataset.relation_feat, base_dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, edge_attention=FLAGS.edge_attention)
-
-    if global_rank == 0:
-        assert FLAGS.model_path_depr is not None or FLAGS.model_path is not None, 'Must be supplied with model to do inference.'
-        if FLAGS.model_path_depr is not None:
+    assert FLAGS.model_path_depr is not None or FLAGS.model_path is not None, 'Must be supplied with model to do inference.'
+    if FLAGS.model_path_depr is not None:
+        model = KGCompletionGNN(base_dataset.relation_feat, base_dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers,
+                                edge_attention=FLAGS.edge_attention, decoder=FLAGS.decoder)
+        if global_rank == 0:
             model.load_state_dict(torch.load(FLAGS.model_path_depr))
-        elif FLAGS.model_path is not None:
-            model = load_model(FLAGS.model_path)
-
+    elif FLAGS.model_path is not None:
+        model = load_model(FLAGS.model_path, ignore_state_dict=(global_rank != 0))
+    else:
+        raise Exception('Must be supplied with model to do inference.')
     model.to(local_rank)
-    ddp_model = DDP(model, device_ids=[local_rank])
+    ddp_model = DDP(model, device_ids=[local_rank], process_group=world)
     ddp_model.eval()
 
     if FLAGS.test_only or FLAGS.validation_batches < 0:
         FLAGS.validation_batches = None
-        gather_sizes = [math.floor(len(eval_dataset) / num_ranks)] * (num_ranks - 1)
+        gather_sizes = [math.ceil(len(eval_dataset) / num_ranks)] * (num_ranks - 1)
         last_size = len(eval_dataset) - sum(gather_sizes)
         gather_sizes.append(last_size)
     else:
@@ -339,6 +342,7 @@ def test(test_dataset: KGTestDataset, test_dataloader: DataLoader, model, global
                                          num_batches, world)
 
     if global_rank == 0:
+        assert len(top10_preds) == len(test_dataset), f"Number of predictions is {len(top10_preds)}. Size of dataset is {len(test_dataset)}"
         input_dict = {'h,r->t': {'t_pred_top10': top10_preds}}
         evaluator.save_test_submission(input_dict=input_dict, dir_path=FLAGS.test_save_dir)
         print(f'Results saved under {FLAGS.test_save_dir}')
@@ -367,6 +371,7 @@ def gather_results(data: torch.Tensor, global_rank, gather_sizes, world):
         for p in range(1, world.size()):
             dist.recv(gather_list[p], src=p, group=world)
     else:
+        assert data.shape == gather_list[global_rank].shape, "Gather size does not match data being sent. Check code for bug."
         dist.send(data, dst=0, group=world)
 
     return torch.cat(gather_list, dim=0)
