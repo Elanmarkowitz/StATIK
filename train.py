@@ -122,7 +122,7 @@ def train(global_rank, local_rank, world):
             batch = prepare_batch_for_model(batch, dataset)
             batch = move_batch_to_device(batch, local_rank)
             ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
-            H, E, preds = ddp_model(ht_tensor, r_tensor, entity_feat, queries, r_relatives)
+            H, E, preds = ddp_model(ht_tensor, r_tensor, entity_feat, queries, r_relatives, r_queries)
 
             loss = loss_fn(H, E, ht_tensor, labels, queries, target) + 0.4 * F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
 
@@ -271,7 +271,7 @@ def run_inference(dataset: Wiki90MEvaluationDataset, dataloader: DataLoader, mod
             batch = prepare_batch_for_model(batch, dataset.ds)
             batch = move_batch_to_device(batch, local_rank)
             ht_tensor, r_tensor, entity_set, entity_feat, queries, _, r_queries, r_relatives, h_or_t_sample = batch
-            preds = model(ht_tensor, r_tensor, entity_feat, queries, r_relatives)
+            preds = model(ht_tensor, r_tensor, entity_feat, queries, r_relatives, r_queries)
             preds = preds.reshape(-1, 1001)
             t_pred_top10 = preds.topk(10).indices
             t_pred_top10 = t_pred_top10.detach()
@@ -351,8 +351,6 @@ def main(argv):
         setproctitle.setproctitle("KGCompletionTrainer:{}".format(grank))
         world = dist.group.WORLD
 
-        if FLAGS.edge_attention and FLAGS.relation_scoring:
-            raise Exception("Only one of relation scoring or edge attention can be enabled!")
         if FLAGS.validation_only or FLAGS.test_only:
             inference_only(grank, FLAGS.local_rank, world)
         else:

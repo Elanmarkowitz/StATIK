@@ -2,6 +2,7 @@ import inspect
 
 import torch
 import torch.nn.functional as F
+from torch_scatter import scatter_softmax
 import math
 from torch import nn
 from torch import Tensor
@@ -14,7 +15,7 @@ class MessageCalculationLayer(nn.Module):
         self.transform_message = nn.Linear(2 * embed_dim, embed_dim)
         self.message_weighting_function = message_weighting_function
 
-    def forward(self, H: Tensor, E: Tensor, r_embed: Tensor, heads: Tensor, queries: Tensor):
+    def forward(self, H: Tensor, E: Tensor, r_embed: Tensor, heads: Tensor, queries: Tensor, r_queries_embed: Tensor):
         """
         :param H: shape n x embed_dim
         :param E: shape m x embed_dim
@@ -26,43 +27,31 @@ class MessageCalculationLayer(nn.Module):
         H_heads = H[heads]
         raw_messages = torch.cat([H_heads, E], dim=1)
         messages = self.transform_message(raw_messages)
-        message_weights = self.message_weighting_function(r_embed, queries) if self.message_weighting_function is not None else None
+        message_weights = self.message_weighting_function(r_embed, queries, r_queries_embed) if self.message_weighting_function is not None else None
 
         # TODO: Maybe normalize
         return message_weights.view(-1, 1) * messages if self.message_weighting_function is not None else messages
 
 
 class MessageWeightingFunction(nn.Module):
-    def __init__(self, relation_embed_dim: int, attention_dim: int):
+    def __init__(self, relation_feature_dim: int, attention_dim: int):
         super(MessageWeightingFunction, self).__init__()
-        self.relation_embed_dim = relation_embed_dim
+        self.relation_feature_dim = relation_feature_dim
         self.attention_dim = attention_dim
-        self.Q = nn.Linear(relation_embed_dim, attention_dim, bias=False)
-        self.K = nn.Linear(relation_embed_dim, attention_dim, bias=False)
+        self.W = nn.Linear(relation_feature_dim, attention_dim, bias=False)
+        self.a = nn.Linear(2 * attention_dim, 1, bias=False)
         self.softmax = nn.Softmax(dim=0)
+        self.act = nn.LeakyReLU(negative_slope=0.1)
 
-    def forward(self, relation_embeds: Tensor, queries: Tensor):
-        query_idxs = queries.nonzero(as_tuple=False).flatten()
+    def forward(self, relation_embeds: Tensor, queries: Tensor, r_queries_embeds: Tensor):
+        W_transform_queries = self.W(r_queries_embeds)
+        W_transform_sampled = self.W(relation_embeds)
+        individual_scores = self.act(self.a(torch.cat([W_transform_queries, W_transform_sampled], dim=1))).flatten()
         value_idxs = torch.roll(queries, shifts=1)
         value_idxs[0] = 0
-        X_attn_idxs = torch.cumsum(value_idxs, dim=0)
-        Y_attn_idxs = torch.arange(relation_embeds.shape[0])
-
-        Q = self.Q(relation_embeds)
-        K = self.K(relation_embeds)
-        Q_query = Q[query_idxs]
-        attn_matrix = torch.matmul(K, Q_query.T) / math.sqrt(self.attention_dim)
-
-        negative_y, negative_x = torch.where(attn_matrix < 0)
-        mask = torch.full(attn_matrix.shape, -1e+30, device=attn_matrix.device)
-        mask[negative_y, negative_x] = 1e+30
-        mask[Y_attn_idxs, X_attn_idxs] = 1
-
-        attn_scores = attn_matrix * mask.detach()
-        attn_scores = self.softmax(attn_scores)
-        attn_scores = attn_scores[Y_attn_idxs, X_attn_idxs]
-
-        return attn_scores
+        scatter_idxs = torch.cumsum(value_idxs, dim=0)
+        attention_weights = scatter_softmax(individual_scores, scatter_idxs, dim=0)
+        return attention_weights
 
 
 class MessagePassingLayer(nn.Module):
@@ -94,7 +83,7 @@ class MessagePassingLayer(nn.Module):
 
         return agg_messages
 
-    def forward(self, H: Tensor, E: Tensor, r_embed: Tensor, ht: Tensor, queries):
+    def forward(self, H: Tensor, E: Tensor, r_embed: Tensor, ht: Tensor, queries, r_queries_embed):
         """
         :param H: shape n x embed_dim
         :param E: shape m x embed_dim
@@ -102,8 +91,8 @@ class MessagePassingLayer(nn.Module):
         :param r_embed: shape m x embed_dim
         :return:
         """
-        messages_fwd = self.calc_messages_fwd(H, E, r_embed, ht[:, 0], queries)
-        messages_back = self.calc_messages_back(H, E, r_embed, ht[:, 1], queries)
+        messages_fwd = self.calc_messages_fwd(H, E, r_embed, ht[:, 0], queries, r_queries_embed)
+        messages_back = self.calc_messages_back(H, E, r_embed, ht[:, 1], queries, r_queries_embed)
         aggregated_messages = self.aggregate_messages(ht, messages_fwd, messages_back, H.shape[0])
         out = self.norm(self.act(aggregated_messages) + H)
         return out
@@ -198,7 +187,7 @@ class KGCompletionGNN(nn.Module):
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
 
-    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, queries: Tensor, r_relatives: Tensor):
+    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, queries: Tensor, r_relatives: Tensor, r_queries: Tensor):
         # Transform entities
         H_0 = self.act(self.entity_input_transform(entity_feat))
         H_0 = self.norm_entity(H_0)
@@ -206,6 +195,7 @@ class KGCompletionGNN(nn.Module):
 
         # Transform relations
         r_embed = self.relation_embedding(r_tensor)
+        r_queries_embed = self.relation_embedding(r_queries)
         r_direction_embed = self.relative_direction_embedding(r_relatives)
         E_0 = self.act(self.edge_input_transform(r_embed))
         E_0 = self.norm_edge(E_0)
@@ -213,7 +203,7 @@ class KGCompletionGNN(nn.Module):
         E_transE = self.transE_relation_embedding(r_tensor)
 
         for i in range(self.num_layers):
-            H = self.message_passing_layers[i](H, E, r_embed, ht, queries)
+            H = self.message_passing_layers[i](H, E, r_embed, ht, queries, r_queries_embed)
             E = self.edge_update_layers[i](H, E, ht)
 
         out = self.classify_triple(H, E, H_0, E_0, ht, queries)
