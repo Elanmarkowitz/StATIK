@@ -106,7 +106,7 @@ def train(global_rank, local_rank, world):
     target = torch.tensor([-1], dtype=torch.long, device=local_rank)
     opt = optim.Adam(ddp_model.parameters(), lr=FLAGS.lr)
     scheduler = optim.lr_scheduler.MultiStepLR(opt,
-                                               milestones=[len(train_loader)],
+                                               milestones=[len(train_loader), 2 * len(train_loader)],
                                                gamma=0.5)
 
     start_epoch = 0
@@ -122,7 +122,7 @@ def train(global_rank, local_rank, world):
             batch = prepare_batch_for_model(batch, dataset)
             batch = move_batch_to_device(batch, local_rank)
             ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
-            H, E, preds = ddp_model(ht_tensor, r_tensor, entity_feat, queries, r_relatives, r_queries)
+            H, E, preds = ddp_model(ht_tensor, r_tensor, entity_feat, queries, r_relatives, h_or_t_sample, r_queries)
 
             loss = loss_fn(H, E, ht_tensor, labels, queries, target) + 0.4 * F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
 
@@ -271,7 +271,7 @@ def run_inference(dataset: Wiki90MEvaluationDataset, dataloader: DataLoader, mod
             batch = prepare_batch_for_model(batch, dataset.ds)
             batch = move_batch_to_device(batch, local_rank)
             ht_tensor, r_tensor, entity_set, entity_feat, queries, _, r_queries, r_relatives, h_or_t_sample = batch
-            preds = model(ht_tensor, r_tensor, entity_feat, queries, r_relatives, r_queries)
+            preds = model(ht_tensor, r_tensor, entity_feat, queries, r_relatives, h_or_t_sample, r_queries)
             preds = preds.reshape(-1, 1001)
             t_pred_top10 = preds.topk(10).indices
             t_pred_top10 = t_pred_top10.detach()

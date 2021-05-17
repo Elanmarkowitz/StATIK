@@ -168,6 +168,7 @@ class KGCompletionGNN(nn.Module):
         self.transE_relation_embedding.weight.data.uniform_(-6 / math.sqrt(embed_dim), 6 / math.sqrt(embed_dim))
 
         self.relative_direction_embedding = nn.Embedding(2, embed_dim)
+        self.head_or_tail_edge_embedding = nn.Embedding(2, embed_dim)
 
         self.entity_input_transform = nn.Linear(input_dim, embed_dim)
 
@@ -187,7 +188,7 @@ class KGCompletionGNN(nn.Module):
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
 
-    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, queries: Tensor, r_relatives: Tensor, r_queries: Tensor):
+    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, queries: Tensor, r_relatives: Tensor, h_or_t_sample: Tensor, r_queries: Tensor):
         # Transform entities
         H_0 = self.act(self.entity_input_transform(entity_feat))
         H_0 = self.norm_entity(H_0)
@@ -197,9 +198,10 @@ class KGCompletionGNN(nn.Module):
         r_embed = self.relation_embedding(r_tensor)
         r_queries_embed = self.relation_embedding(r_queries)
         r_direction_embed = self.relative_direction_embedding(r_relatives)
+        h_or_t_sample_embed = self.head_or_tail_edge_embedding(h_or_t_sample)
         E_0 = self.act(self.edge_input_transform(r_embed))
         E_0 = self.norm_edge(E_0)
-        E = E_0 + r_direction_embed
+        E = E_0 + r_direction_embed + h_or_t_sample_embed
         E_transE = self.transE_relation_embedding(r_tensor)
 
         for i in range(self.num_layers):
