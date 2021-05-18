@@ -237,7 +237,7 @@ class KGCompletionGNN(nn.Module):
         self.relation_correlation_model = RelationCorrelationModel(relation_feat.shape[0], embed_dim)
 
         self.decoder = decoder
-        if self.decoder in ["MLP", "MLP+TransE"]:
+        if self.decoder in ["MLP", "MLP+TransE", "RelCorr+MLP"]:
             self.classify_triple = TripleClassificationLayer(embed_dim)
         if self.decoder in ["TransE", "MLP+TransE", "RelCorr+TransE"]:
             self.transE_decoder = TransEDecoder(relation_feat.shape[0], embed_dim)
@@ -277,6 +277,8 @@ class KGCompletionGNN(nn.Module):
         elif self.decoder == "RelCorr+TransE":
             transe_out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
             out = rel_corr_score.flatten() + transe_out
+        elif self.decoder == "RelCorr+MLP":
+            out = rel_corr_score.flatten() + self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
         else:
             out = None
             Exception('Decoder not valid.')
@@ -293,6 +295,9 @@ class KGCompletionGNN(nn.Module):
             self.margin = margin
             return self.combo_loss
         elif self.decoder == "RelCorr+TransE":
+            self.margin = margin
+            return self.margin_ranking_loss
+        elif self.decoder == "RelCorr+MLP":
             self.margin = margin
             return self.margin_ranking_loss
 
