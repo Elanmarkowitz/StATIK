@@ -246,7 +246,7 @@ class KGEvaluationDataset(Dataset):
 
             out_batches = []
             if self.num_candidates_per_itr is not None:
-                for i in range(0, self.ds.num_entities, self.num_candidates_per_itr):
+                for i in range(0, batch_t_candidates[0].shape[0], self.num_candidates_per_itr):
                     subbatch_t_candidates = [batch_t_candidates[e][i:i+self.num_candidates_per_itr] for e in range(len(batch_t_candidates))]
                     subbatch = hrt_collate(list(zip(batch_h, batch_r, subbatch_t_candidates)))
                     out_batches.append(subbatch)
