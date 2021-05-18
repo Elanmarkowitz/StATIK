@@ -260,8 +260,7 @@ def inference_only(global_rank, local_rank, world):
     if FLAGS.validation_only:
         result = validate(eval_dataset, eval_dataloader, ddp_model, global_rank, local_rank, gather_sizes, FLAGS.validation_batches, world)
         if global_rank == 0:
-            mrr = result['mrr']
-            print('Validation MRR = {}'.format(mrr))
+            print('Validation ' + ' '.join([f'{k}={result[k]}' for k in result.keys()]))
     else:
         test(eval_dataset, eval_dataloader, ddp_model, global_rank, local_rank, gather_sizes, None, world)
 
@@ -288,7 +287,7 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
             top_10s.append(t_pred_top10)
 
             if t_filter_mask is not None:
-                filter_masks.append(t_filter_mask)
+                filter_masks.append(torch.from_numpy(t_filter_mask).to(local_rank))
 
             if use_full_preds:
                 full_preds.append(preds.detach())
@@ -325,12 +324,21 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
 def validate(valid_dataset: KGValidationDataset, valid_dataloader: DataLoader, model, global_rank: int,
              local_rank: int, gather_sizes: list, num_batches: int = None, world=None):
     evaluator = WikiKG90MEvaluator()
-    top10_preds, correct_indices, _, _ = run_inference(valid_dataset, valid_dataloader, model, global_rank, local_rank,
-                                                       gather_sizes, num_batches, world)
+    use_full_preds = FLAGS.dataset != "wikikg90m_kddcup2021"
+    top10_preds, correct_indices, full_preds, filter_mask = run_inference(valid_dataset, valid_dataloader, model,
+                                                                          global_rank, local_rank, gather_sizes,
+                                                                          num_batches, world,
+                                                                          use_full_preds=use_full_preds)
     if global_rank == 0:
-        input_dict = {'h,r->t': {'t_pred_top10': top10_preds.cpu().numpy(), 't_correct_index': correct_indices.cpu().numpy()}}
-        result_dict = evaluator.eval(input_dict)
-        return result_dict
+        if use_full_preds:
+            result_dict = compute_eval_stats(full_preds.detach().cpu().numpy(),
+                                             correct_indices.detach().cpu().numpy(),
+                                             filter_mask=filter_mask.detach().cpu().numpy())
+            return result_dict
+        else:
+            input_dict = {'h,r->t': {'t_pred_top10': top10_preds.cpu().numpy(), 't_correct_index': correct_indices.cpu().numpy()}}
+            result_dict = evaluator.eval(input_dict)
+            return result_dict
     else:
         return None
 

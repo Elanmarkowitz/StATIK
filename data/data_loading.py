@@ -230,7 +230,6 @@ class KGEvaluationDataset(Dataset):
     def get_eval_collate_fn(self, max_neighbors=10):
         def collate_fn(batch):
             hrt_collate = self.ds.get_collate_fn(max_neighbors=max_neighbors)
-
             batch_h = array("i")
             batch_r = array("i")
             batch_t_candidates = []
@@ -247,8 +246,8 @@ class KGEvaluationDataset(Dataset):
 
             out_batches = []
             if self.num_candidates_per_itr is not None:
-                for i in range(0, len(self), self.num_candidates_per_itr):
-                    subbatch_t_candidates = batch_t_candidates[i:i+self.num_candidates_per_itr]
+                for i in range(0, self.ds.num_entities, self.num_candidates_per_itr):
+                    subbatch_t_candidates = [batch_t_candidates[e][i:i+self.num_candidates_per_itr] for e in range(len(batch_t_candidates))]
                     subbatch = hrt_collate(list(zip(batch_h, batch_r, subbatch_t_candidates)))
                     out_batches.append(subbatch)
             else:
@@ -263,14 +262,16 @@ class KGEvaluationDataset(Dataset):
 
 
 class KGValidationDataset(KGEvaluationDataset):
-    def __init__(self, full_dataset: KGProcessedDataset):
-        super(KGValidationDataset, self).__init__(full_dataset, full_dataset.valid_dict['h,r->t'])
+    def __init__(self, full_dataset: KGProcessedDataset, num_candidates_per_itr=1001):
+        super(KGValidationDataset, self).__init__(full_dataset, full_dataset.valid_dict['h,r->t'],
+                                                  num_candidates_per_itr=num_candidates_per_itr)
         self.t_correct_index = self.task['t_correct_index']
 
 
 class KGTestDataset(KGEvaluationDataset):
-    def __init__(self, full_dataset: KGProcessedDataset):
-        super(KGTestDataset, self).__init__(full_dataset, full_dataset.test_dict['h,r->t'])
+    def __init__(self, full_dataset: KGProcessedDataset, num_candidates_per_itr=1001):
+        super(KGTestDataset, self).__init__(full_dataset, full_dataset.test_dict['h,r->t'],
+                                            num_candidates_per_itr=num_candidates_per_itr)
         if 't_correct_index' in self.task:
             self.t_correct_index = self.task['t_correct_index']
 
