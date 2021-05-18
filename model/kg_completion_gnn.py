@@ -237,17 +237,14 @@ class KGCompletionGNN(nn.Module):
         self.relation_correlation_model = RelationCorrelationModel(relation_feat.shape[0], embed_dim)
 
         self.decoder = decoder
-        if self.decoder in ["MLP", "MLP+TransE", "RelCorr+MLP"]:
-            self.classify_triple = TripleClassificationLayer(embed_dim)
-        if self.decoder in ["TransE", "MLP+TransE", "RelCorr+TransE"]:
-            self.transE_decoder = TransEDecoder(relation_feat.shape[0], embed_dim)
+        self.classify_triple = TripleClassificationLayer(embed_dim)
+        self.transE_decoder = TransEDecoder(relation_feat.shape[0], embed_dim)
 
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
 
     def forward(self, ht: Tensor, r_tensor: Tensor, r_query: Tensor, entity_feat: Tensor, r_relative, h_or_t_sample, queries: Tensor):
         # Transform entities
-        rel_corr_score = self.relation_correlation_model(ht, r_query, r_tensor, r_relative, h_or_t_sample, queries, entity_feat.shape[0])
 
         H_0 = self.act(self.entity_input_transform(entity_feat))
         H_0 = self.norm_entity(H_0)
@@ -275,9 +272,13 @@ class KGCompletionGNN(nn.Module):
             else:
                 out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
         elif self.decoder == "RelCorr+TransE":
+            rel_corr_score = self.relation_correlation_model(ht, r_query, r_tensor, r_relative, h_or_t_sample, queries,
+                                                             entity_feat.shape[0])
             transe_out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
             out = rel_corr_score.flatten() + transe_out
         elif self.decoder == "RelCorr+MLP":
+            rel_corr_score = self.relation_correlation_model(ht, r_query, r_tensor, r_relative, h_or_t_sample, queries,
+                                                             entity_feat.shape[0])
             out = rel_corr_score.flatten() + self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
         else:
             out = None
@@ -300,6 +301,8 @@ class KGCompletionGNN(nn.Module):
         elif self.decoder == "RelCorr+MLP":
             self.margin = margin
             return self.margin_ranking_loss
+        else:
+            Exception(f"Loss function not known for {}")
 
     def margin_ranking_loss(self, scores, labels):
         distances = -1 * scores
