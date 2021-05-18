@@ -106,7 +106,7 @@ def train(global_rank, local_rank, world):
     target = torch.tensor([-1], dtype=torch.long, device=local_rank)
     opt = optim.Adam(ddp_model.parameters(), lr=FLAGS.lr)
     scheduler = optim.lr_scheduler.MultiStepLR(opt,
-                                               milestones=[len(train_loader), 2 * len(train_loader)],
+                                               milestones=[len(train_loader), 2 * len(train_loader), 3 * len(train_loader)],
                                                gamma=0.5)
 
     start_epoch = 0
