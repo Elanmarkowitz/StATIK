@@ -127,7 +127,7 @@ def train(global_rank, local_rank, world):
             ddp_model.train()
             batch = prepare_batch_for_model(batch, dataset)
             batch = move_batch_to_device(batch, local_rank)
-            ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
+            ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
             scores = ddp_model(ht_tensor, r_tensor, r_queries, entity_feat, r_relatives, h_or_t_sample, queries)
 
             loss = loss_fn(scores, labels.float())
