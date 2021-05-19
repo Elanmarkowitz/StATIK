@@ -395,7 +395,7 @@ def main(argv):
                                 init_method="tcp://{}:{}".format(master_addr, master_port), rank=grank, world_size=ws)
 
         setproctitle.setproctitle("KGCompletionTrainer:{}".format(grank))
-        world = dist.new_group([i for i in range(ws)], backend=dist.Backend.NCCL)
+        world = dist.group.WORLD
 
         if FLAGS.edge_attention and FLAGS.relation_scoring:
             raise Exception("Only one of relation scoring or edge attention can be enabled!")
