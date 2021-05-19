@@ -279,7 +279,7 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
             for subbatch in subbatches:
                 subbatch = prepare_batch_for_model(subbatch, dataset.ds)
                 subbatch = move_batch_to_device(subbatch, local_rank)
-                ht_tensor, r_tensor, entity_set, entity_feat, queries, _, r_queries, r_relatives, h_or_t_sample = subbatch
+                ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, _, r_queries, r_relatives, h_or_t_sample = subbatch
                 subbatch_preds = model(ht_tensor, r_tensor, r_queries, entity_feat, r_relatives, h_or_t_sample, queries)
                 subbatch_preds = subbatch_preds.reshape(dataloader.batch_size, -1)  # TODO: inferring number of candidates, check that this is right.
                 preds.append(subbatch_preds)
