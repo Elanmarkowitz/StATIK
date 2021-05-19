@@ -254,7 +254,7 @@ class KGCompletionGNN(nn.Module):
 
         # Transform relations
         r_embed = self.relation_embedding(r_tensor)
-        r_direction_embed = self.relative_direction_embedding(r_relatives)
+        r_direction_embed = self.relative_direction_embedding(r_relative)
         h_or_t_sample_embed = self.head_or_tail_edge_embedding(h_or_t_sample)
         E_0 = self.act(self.edge_input_transform(r_embed))
         E_0 = self.norm_edge(E_0)
