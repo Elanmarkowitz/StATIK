@@ -189,6 +189,8 @@ class KGProcessedDataset(Dataset):
             outdeg = self.outdegrees[entity_set]
             indeg_feat = np.stack([indeg // 10**i for i in range(0, 7)]).astype(np.bool).astype(np.int32).T
             outdeg_feat = np.stack([outdeg // 10 ** i for i in range(0, 7)]).astype(np.bool).astype(np.int32).T
+            indeg_feat = torch.from_numpy(indeg_feat).float()
+            outdeg_feat = torch.from_numpy(outdeg_feat).float()
 
             entity_feat = None  # TODO: Remove this
             queries = torch.from_numpy(np.array(is_query)).long()
