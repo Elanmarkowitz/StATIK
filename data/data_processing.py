@@ -32,6 +32,7 @@ def load_original_data(root_data_dir: str, dataset_name: str) -> ProcessableData
     else:
         raise Exception('Dataset not known.')
 
+
 def get_filtered_candidate(queries, true_triples, num_entities):
     candidates = np.tile(np.arange(0, num_entities), queries.shape[0])
     A = np.append(np.repeat(queries, num_entities, axis=0), candidates[:, np.newaxis], axis=1)
@@ -40,7 +41,6 @@ def get_filtered_candidate(queries, true_triples, num_entities):
     idx = np.nonzero(np.in1d(A.view(dt).reshape(-1), np.ascontiguousarray(true_triples).view(dt).reshape(-1)))[0]
     candidates[idx] = -1
     return candidates
-
 
 
 def process_data(root_data_dir: str, dataset_name: str) -> None:
@@ -69,15 +69,21 @@ def process_data(root_data_dir: str, dataset_name: str) -> None:
     edge_dict = defaultdict(lambda: array.array('i')) # sp.dok_matrix((dataset.num_entities, dataset.num_entities), dtype=np.int64)
     relation_dict = defaultdict(lambda: array.array('i')) # sp.dok_matrix((dataset.num_entities, dataset.num_entities), dtype=np.int64)
     degrees = np.zeros((dataset.num_entities,), dtype=np.int32)
+    indegrees = np.zeros((dataset.num_entities,), dtype=np.int32)
+    outdegrees = np.zeros((dataset.num_entities,), dtype=np.int32)
     print("Building edge dict.")
     for i in tqdm.tqdm(range(len(train_ht))):
         h,r,t,r_inv = int(train_ht[i][0]), int(train_r[i]), int(train_ht[i][1]), int(train_r_inverse[i])
         edge_dict[h].append(t)
         relation_dict[h].append(r)
         degrees[h] = degrees[h] + 1
+        outdegrees[h] = outdegrees[h] + 1
+
         edge_dict[t].append(h)
         relation_dict[t].append(r_inv)
         degrees[t] = degrees[t] + 1
+        indegrees[t] = indegrees[t] + 1
+
     edge_dict = dict(edge_dict)
     relation_dict = dict(relation_dict)
     print("Converting to np arrays.")
@@ -123,11 +129,11 @@ def process_data(root_data_dir: str, dataset_name: str) -> None:
     # with open(os.path.join(save_dir, 'relation_dict.pkl'), 'wb') as f:
     #     pickle.dump(relation_dict, f)
     np.save(os.path.join(save_dir, 'degrees.npy'), degrees)
+    np.save(os.path.join(save_dir, 'indegrees.npy'), indegrees)
+    np.save(os.path.join(save_dir, 'outdegrees.npy'), outdegrees)
 
-    total = np.concatenate((dataset.train_hrt,
-        dataset.valid_hrt,
-        dataset.test_hrt), axis=0
-        )
+    if hasattr(dataset, 'valid_hrt') or hasattr(dataset, 'test_hrt'):
+        total = np.concatenate((dataset.train_hrt, dataset.valid_hrt, dataset.test_hrt), axis=0)
     if hasattr(dataset, 'valid_hrt'):
         num_valid = dataset.valid_hrt[:, [0, 1]].shape[0]
         valid_cand = np.tile(np.arange(0, dataset.num_entities), num_valid)
@@ -157,6 +163,8 @@ def load_processed_data(root_data_dir: str, dataset_name: str) -> WikiKG90MDatas
     print('Loading processed dataset.')
     dataset = load_original_data(root_data_dir, dataset_name)
     dataset.degrees = np.load(os.path.join(save_dir, 'degrees.npy'))
+    dataset.indegrees = np.load(os.path.join(save_dir, 'indegrees.npy'))
+    dataset.outdegrees = np.load(os.path.join(save_dir, 'outdegrees.npy'))
     # dataset.train_ht_inverse = np.load(os.path.join(save_dir, 'train_ht_inverse.npy'))
     # dataset.train_r_inverse = np.load(os.path.join(save_dir, 'train_r_inverse.npy'))
     dataset.train_ht = dataset.train_hrt[:, [0,2]].astype(np.int32)

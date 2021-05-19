@@ -32,6 +32,8 @@ class KGProcessedDataset(Dataset):
         self.edge_lccsr: LeftContiguousCSR = dataset.edge_lccsr
         self.relation_lccsr: LeftContiguousCSR = dataset.relation_lccsr
         self.degrees = dataset.degrees
+        self.indegrees = dataset.indegrees
+        self.outdegrees = dataset.outdegrees
         self.feature_dim = self.entity_feat.shape[1]
         self.valid_dict = dataset.valid_dict
         self.test_dict = dataset.test_dict
@@ -182,13 +184,21 @@ class KGProcessedDataset(Dataset):
             ht_tensor = torch.from_numpy(np.stack([edge_heads, edge_tails]).transpose()).long()
             r_tensor = torch.from_numpy(np.array(edge_relations)).long()
             entity_set = torch.from_numpy(np.array(batch_id_to_node_id)).long()
+
+            indeg = self.indegrees[entity_set]
+            outdeg = self.outdegrees[entity_set]
+            indeg_feat = np.stack([indeg // 10**i for i in range(0, 7)]).astype(np.bool).astype(np.int32).T
+            outdeg_feat = np.stack([outdeg // 10 ** i for i in range(0, 7)]).astype(np.bool).astype(np.int32).T
+            indeg_feat = torch.from_numpy(indeg_feat).float()
+            outdeg_feat = torch.from_numpy(outdeg_feat).float()
+
             entity_feat = None  # TODO: Remove this
             queries = torch.from_numpy(np.array(is_query)).long()
             labels = torch.from_numpy(np.array(labels)).long()
             r_queries = torch.from_numpy(np.array(r_queries)).long()
             r_relatives = torch.from_numpy(np.array(r_relatives)).long()
             h_or_t_sample = torch.from_numpy(np.array(h_or_t_sample)).long()
-            return ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
+            return ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
         return wikikg_collate_fn
 
 

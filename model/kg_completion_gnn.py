@@ -74,7 +74,8 @@ class MessagePassingLayer(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
         self.act = nn.LeakyReLU()
 
-    def aggregate_messages(self, ht: Tensor, messages_fwd: Tensor, messages_back: Tensor, nodes_in_batch: int):
+    @staticmethod
+    def aggregate_messages(ht: Tensor, messages_fwd: Tensor, messages_back: Tensor, nodes_in_batch: int):
         """
         :param ht: shape m x 2
         :param messages_fwd: shape m x embed_dim
@@ -85,8 +86,8 @@ class MessagePassingLayer(nn.Module):
         device = messages_fwd.device
         msg_dst = torch.cat([ht[:, 1], ht[:, 0]])
         messages = torch.cat([messages_fwd, messages_back], dim=0)
-        agg_messages = torch.zeros((nodes_in_batch, self.embed_dim), dtype=messages_fwd.dtype, device=device)
-        agg_messages = torch.scatter_add(agg_messages, 0, msg_dst.reshape(-1, 1).expand(-1, self.embed_dim), messages)
+        agg_messages = torch.zeros((nodes_in_batch, messages_fwd.shape[1]), dtype=messages_fwd.dtype, device=device)
+        agg_messages = torch.scatter_add(agg_messages, 0, msg_dst.reshape(-1, 1).expand(-1, messages_fwd.shape[1]), messages)
         num_msgs = torch.zeros((nodes_in_batch,), dtype=torch.float, device=device)
         unique, counts = msg_dst.unique(return_counts=True)
         num_msgs[unique] = counts.float()
@@ -158,6 +159,49 @@ class EdgeUpdateLayer(nn.Module):
         return out
 
 
+class RelationCorrelationModel(nn.Module):
+    def __init__(self, num_relations: int, embed_dim: int):
+        super(RelationCorrelationModel, self).__init__()
+        self.relation_correlation_embedding = nn.Embedding(num_relations, embed_dim)
+        self.ht_transform = nn.Linear(embed_dim, embed_dim)
+        self.hh_transform = nn.Linear(embed_dim, embed_dim)
+        self.th_transform = nn.Linear(embed_dim, embed_dim)
+        self.tt_transform = nn.Linear(embed_dim, embed_dim)
+        self.correlation_weight_table = nn.Parameter(torch.ones(num_relations, num_relations).float())
+        self.final_embedding = nn.Linear(2 * embed_dim, embed_dim)
+        self.final_score = nn.Linear(embed_dim, 1)
+
+    def forward(self, ht: Tensor, r_q: Tensor, r_tensor: Tensor, r_relative: Tensor, h_or_t_sample: Tensor,
+                queries: Tensor, num_nodes: int):
+        r_corr_embed = self.relation_correlation_embedding(r_tensor)
+        r_corr_embed = r_corr_embed * torch.sigmoid(self.correlation_weight_table[r_tensor, r_q]).view(-1, 1)
+
+        # compute the relation embedding for all topologies
+        hh_embed = self.hh_transform(r_corr_embed)
+        ht_embed = self.ht_transform(r_corr_embed)
+        th_embed = self.th_transform(r_corr_embed)
+        tt_embed = self.tt_transform(r_corr_embed)
+        all_embed = torch.stack([torch.stack([tt_embed, th_embed]), torch.stack([ht_embed, hh_embed])])
+
+        # select the topology present
+        selected_embed = all_embed[r_relative, h_or_t_sample, torch.arange(r_relative.shape[0])]
+
+        # query relationship does not pass information
+        selected_embed = selected_embed * torch.logical_not(queries).float().view(-1,1)
+
+        aggregated_to_nodes = MessagePassingLayer.aggregate_messages(ht, selected_embed, selected_embed, num_nodes)
+
+        query_idx = queries.nonzero().flatten()
+        query_entities = ht[query_idx]
+        query_r_type = r_tensor[query_idx]
+
+        aggregated_to_query = aggregated_to_nodes[query_entities[:,0]] + aggregated_to_nodes[query_entities[:,1]]
+
+        final_query_embedding = self.final_embedding(torch.cat([aggregated_to_query, self.relation_correlation_embedding(query_r_type)], dim=1))
+
+        return self.final_score(final_query_embedding)
+
+
 class KGCompletionGNN(nn.Module):
     def __init__(self, relation_feat, input_dim: int, embed_dim: int, num_layers: int, norm=2, edge_attention=False,
                  decoder: str = "MLP+TransE"):
@@ -192,17 +236,18 @@ class KGCompletionGNN(nn.Module):
             self.message_passing_layers.append(MessagePassingLayer(embed_dim, message_weighting_function=self.message_weighting_function))
             self.edge_update_layers.append(EdgeUpdateLayer(embed_dim))
 
+        self.relation_correlation_model = RelationCorrelationModel(relation_feat.shape[0], embed_dim)
+
         self.decoder = decoder
-        if self.decoder in ["MLP", "MLP+TransE"]:
-            self.classify_triple = TripleClassificationLayer(embed_dim)
-        if self.decoder in ["TransE", "MLP+TransE"]:
-            self.transE_decoder = TransEDecoder(relation_feat.shape[0], embed_dim)
+        self.classify_triple = TripleClassificationLayer(embed_dim)
+        self.transE_decoder = TransEDecoder(relation_feat.shape[0], embed_dim)
 
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
 
-    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, queries: Tensor, r_relatives: Tensor, h_or_t_sample: Tensor):
+    def forward(self, ht: Tensor, r_tensor: Tensor, r_query: Tensor, entity_feat: Tensor, r_relative, h_or_t_sample, queries: Tensor):
         # Transform entities
+
         H_0 = self.act(self.entity_input_transform(entity_feat))
         H_0 = self.norm_entity(H_0)
         H = H_0
@@ -225,11 +270,20 @@ class KGCompletionGNN(nn.Module):
             out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
         elif self.decoder == "MLP+TransE":
             if self.training:
-                mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries)
+                mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
                 transe_out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
                 out = (mlp_out.flatten(), transe_out)
             else:
                 out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
+        elif self.decoder == "RelCorr+TransE":
+            rel_corr_score = self.relation_correlation_model(ht, r_query, r_tensor, r_relative, h_or_t_sample, queries,
+                                                             entity_feat.shape[0])
+            transe_out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
+            out = rel_corr_score.flatten() + transe_out
+        elif self.decoder == "RelCorr+MLP":
+            rel_corr_score = self.relation_correlation_model(ht, r_query, r_tensor, r_relative, h_or_t_sample, queries,
+                                                             entity_feat.shape[0])
+            out = rel_corr_score.flatten() + self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
         else:
             out = None
             Exception('Decoder not valid.')
@@ -245,6 +299,14 @@ class KGCompletionGNN(nn.Module):
         elif self.decoder == "MLP+TransE":
             self.margin = margin
             return self.combo_loss
+        elif self.decoder == "RelCorr+TransE":
+            self.margin = margin
+            return self.margin_ranking_loss
+        elif self.decoder == "RelCorr+MLP":
+            self.margin = margin
+            return self.margin_ranking_loss
+        else:
+            Exception(f"Loss function not known for {self.decoder}")
 
     def margin_ranking_loss(self, scores, labels):
         distances = -1 * scores
