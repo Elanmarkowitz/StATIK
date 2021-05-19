@@ -57,27 +57,29 @@ CHECKPOINT_DIR = "checkpoints"
 
 
 def prepare_batch_for_model(batch, dataset: KGProcessedDataset, save_batch=False):
-    ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
+    ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
     if entity_feat is None:
         entity_feat = torch.from_numpy(dataset.entity_feat[entity_set]).float()
 
-    batch = ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
+    batch = ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
     if save_batch:
         pickle.dump(batch, open('sample_batch.pkl', 'wb'))
     return batch
 
 
 def move_batch_to_device(batch, device):
-    ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
+    ht_tensor, r_tensor, entity_set, entity_feat,  indeg_feat, outdeg_feat,queries, labels, r_queries, r_relatives, h_or_t_sample = batch
     ht_tensor = ht_tensor.to(device)
     r_tensor = r_tensor.to(device)
     entity_feat = entity_feat.to(device)
+    indeg_feat = indeg_feat.to(device)
+    outdeg_feat = outdeg_feat.to(device)
     queries = queries.to(device)
     labels = labels.to(device)
     r_queries = r_queries.to(device)
     r_relatives = r_relatives.to(device)
     h_or_t_sample = h_or_t_sample.to(device)
-    batch = ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
+    batch = ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
     return batch
 
 
