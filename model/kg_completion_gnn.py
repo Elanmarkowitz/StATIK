@@ -174,6 +174,8 @@ class KGCompletionGNN(nn.Module):
         self.relation_embedding = nn.Embedding(relation_feat.shape[0], relation_feat.shape[1])
         self.relation_embedding.weight = nn.Parameter(torch.tensor(relation_feat, dtype=torch.float))
         self.relation_embedding.weight.requires_grad = False  # Comment to learn through message passing relation embedding table
+        self.relative_direction_embedding = nn.Embedding(2, embed_dim)
+        self.head_or_tail_edge_embedding = nn.Embedding(2, embed_dim)
 
         self.edge_input_transform = nn.Linear(relation_feat.shape[1], embed_dim)
 
@@ -199,7 +201,7 @@ class KGCompletionGNN(nn.Module):
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
 
-    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, queries: Tensor):
+    def forward(self, ht: Tensor, r_tensor: Tensor, entity_feat: Tensor, queries: Tensor, r_relatives: Tensor, h_or_t_sample: Tensor):
         # Transform entities
         H_0 = self.act(self.entity_input_transform(entity_feat))
         H_0 = self.norm_entity(H_0)
@@ -207,9 +209,11 @@ class KGCompletionGNN(nn.Module):
 
         # Transform relations
         r_embed = self.relation_embedding(r_tensor)
+        r_direction_embed = self.relative_direction_embedding(r_relatives)
+        h_or_t_sample_embed = self.head_or_tail_edge_embedding(h_or_t_sample)
         E_0 = self.act(self.edge_input_transform(r_embed))
         E_0 = self.norm_edge(E_0)
-        E = E_0
+        E = E_0 + r_direction_embed + h_or_t_sample_embed
 
         for i in range(self.num_layers):
             H = self.message_passing_layers[i](H, E, ht, queries)
