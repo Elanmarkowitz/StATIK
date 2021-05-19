@@ -3,6 +3,7 @@ import os
 import numpy as np
 import array
 from typing import Union
+import pickle
 
 import tqdm
 from ogb.lsc import WikiKG90MDataset
@@ -131,22 +132,24 @@ def process_data(root_data_dir: str, dataset_name: str) -> None:
         num_valid = dataset.valid_hrt[:, [0, 1]].shape[0]
         valid_cand = np.tile(np.arange(0, dataset.num_entities), num_valid)
         filtered_cand = get_filtered_candidate(dataset.valid_hrt[:, [0, 1]], total, dataset.num_entities)
-        valid_task = {'h,r->t': {
+        valid_dict = {'h,r->t': {
             'hr': dataset.valid_hrt[:, [0, 1]],
             't_candidate': valid_cand.reshape((num_valid, dataset.num_entities)),  # this needs to be repeated for each validation triple shape: (num valid, num_entities)
             't_candidate_filter_mask': filtered_cand.reshape((num_valid, dataset.num_entities)),
-            't_correct': dataset.valid_hrt[:, 2]
+            't_correct_index': dataset.valid_hrt[:, 2]
         }}
+        pickle.dump(valid_dict, open(os.path.join(save_dir, 'valid_dict.pkl'), 'wb'))
     if hasattr(dataset, 'test_hrt'):
         num_test = dataset.test_hrt[:, [0, 1]].shape[0]
         test_cand = np.tile(np.arange(0, dataset.num_entities), num_test)
         filtered_cand = get_filtered_candidate(dataset.test_hrt[:, [0, 1]], total, dataset.num_entities)
-        test_task = {'h,r->t': {
+        test_dict = {'h,r->t': {
             'hr': dataset.test_hrt[:, [0, 1]],
             't_candidate': test_cand.reshape((num_test, dataset.num_entities)),
             't_candidate_filter_mask': filtered_cand.reshape((num_test, dataset.num_entities)),
-            't_correct': dataset.test_hrt[:, 2]
+            't_correct_index': dataset.test_hrt[:, 2]
         }}
+        pickle.dump(test_dict, open(os.path.join(save_dir, 'test_dict.pkl'), 'wb'))
 
 
 def load_processed_data(root_data_dir: str, dataset_name: str) -> WikiKG90MDataset:
@@ -168,5 +171,9 @@ def load_processed_data(root_data_dir: str, dataset_name: str) -> WikiKG90MDatas
     # dataset.relation_csr = sp.load_npz(os.path.join(save_dir, 'rel_csr.npz'))
     dataset.edge_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, 'edge_lccsr.npz'))
     dataset.relation_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, 'rel_lccsr.npz'))
+    if os.path.isfile(os.path.join(save_dir, 'valid_dict.pkl')):
+        dataset.valid_dict = pickle.load(open(os.path.join(save_dir, 'valid_dict.pkl'), 'rb'))
+    if os.path.isfile(os.path.join(save_dir, 'test_dict.pkl')):
+        dataset.test_dict = pickle.load(open(os.path.join(save_dir, 'test_dict.pkl'), 'rb'))
     return dataset
 

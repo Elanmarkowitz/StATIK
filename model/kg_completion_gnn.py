@@ -302,7 +302,7 @@ class KGCompletionGNN(nn.Module):
             self.margin = margin
             return self.margin_ranking_loss
         else:
-            Exception(f"Loss function not known for {}")
+            Exception(f"Loss function not known for {self.decoder}")
 
     def margin_ranking_loss(self, scores, labels):
         distances = -1 * scores
