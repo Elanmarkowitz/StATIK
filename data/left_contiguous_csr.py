@@ -18,7 +18,7 @@ class LeftContiguousCSR:
     @staticmethod
     def load(filepath):
         npzfile = np.load(filepath)
-        return LeftContiguousCSR(npzfile['indptr'].astype(np.int64), npzfile['degrees'].astype(np.int64), npzfile['data'].astype(np.int64))
+        return LeftContiguousCSR(npzfile['indptr'], npzfile['degrees'], npzfile['data'])
 
 # uniform batch sampling can be done as follows
 
