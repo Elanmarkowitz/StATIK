@@ -40,7 +40,6 @@ flags.DEFINE_integer("embed_dim", 256, "Number of dimensions for hidden states."
 flags.DEFINE_integer("layers", 2, "Number of message passing and edge update layers for model.")
 flags.DEFINE_float("lr", 1e-2, "Learning rate for optimizer.")
 flags.DEFINE_integer("validate_every", 1024, "How many iterations to do between each single batch validation.")
-flags.DEFINE_bool("edge_attention", False, "Whether or not to attend to edges during ")
 flags.DEFINE_integer("validation_batches", 1000, "Number of batches to do for each validation check.")
 flags.DEFINE_integer("valid_batch_size", 1, "Batch size for validation (does all t_candidates at once).")
 flags.DEFINE_integer("epochs", 1, "Num epochs to train for")
@@ -103,8 +102,7 @@ def train(global_rank, local_rank, world):
     if FLAGS.checkpoint is not None:
         model = load_model(os.path.join(CHECKPOINT_DIR, FLAGS.checkpoint), ignore_state_dict=(global_rank != 0))
     else:
-        model = KGCompletionGNN(dataset.relation_feat, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers,
-                                edge_attention=FLAGS.edge_attention, decoder=FLAGS.decoder)
+        model = KGCompletionGNN(dataset.relation_feat, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, decoder=FLAGS.decoder)
 
     model.to(local_rank)
 
@@ -112,7 +110,7 @@ def train(global_rank, local_rank, world):
     loss_fn = model.get_loss_fn(margin=FLAGS.margin)
     opt = optim.Adam(ddp_model.parameters(), lr=FLAGS.lr)
     scheduler = optim.lr_scheduler.MultiStepLR(opt,
-                                               milestones=[len(train_loader)],
+                                               milestones=[len(train_loader), 2 * len(train_loader), 3 * len(train_loader)],
                                                gamma=0.5)
 
     start_epoch = 0
@@ -239,8 +237,7 @@ def inference_only(global_rank, local_rank, world):
 
     assert FLAGS.model_path_depr is not None or FLAGS.model_path is not None, 'Must be supplied with model to do inference.'
     if FLAGS.model_path_depr is not None:
-        model = KGCompletionGNN(base_dataset.relation_feat, base_dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers,
-                                edge_attention=FLAGS.edge_attention, decoder=FLAGS.decoder)
+        model = KGCompletionGNN(base_dataset.relation_feat, base_dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, decoder=FLAGS.decoder)
         if global_rank == 0:
             model.load_state_dict(torch.load(FLAGS.model_path_depr))
     elif FLAGS.model_path is not None:
@@ -399,8 +396,6 @@ def main(argv):
         setproctitle.setproctitle("KGCompletionTrainer:{}".format(grank))
         world = dist.group.WORLD
 
-        if FLAGS.edge_attention and FLAGS.relation_scoring:
-            raise Exception("Only one of relation scoring or edge attention can be enabled!")
         if FLAGS.validation_only or FLAGS.test_only:
             inference_only(grank, FLAGS.local_rank, world)
         else:

@@ -8,11 +8,10 @@ from torch import Tensor
 
 
 class MessageCalculationLayer(nn.Module):
-    def __init__(self, embed_dim: int, message_weighting_function=None):
+    def __init__(self, embed_dim: int):
         super(MessageCalculationLayer, self).__init__()
         self.embed_dim = embed_dim
         self.transform_message = nn.Linear(2 * embed_dim, embed_dim)
-        self.message_weighting_function = message_weighting_function
 
     def forward(self, H: Tensor, E: Tensor, heads: Tensor, queries: Tensor):
         """
@@ -26,51 +25,17 @@ class MessageCalculationLayer(nn.Module):
         H_heads = H[heads]
         raw_messages = torch.cat([H_heads, E], dim=1)
         messages = self.transform_message(raw_messages)
-        message_weights = self.message_weighting_function(E, queries) if self.message_weighting_function is not None else None
 
         # TODO: Maybe normalize
-        return message_weights.view(-1, 1) * messages if self.message_weighting_function is not None else messages
-
-
-class MessageWeightingFunction(nn.Module):
-    def __init__(self, relation_embed_dim: int, attention_dim: int):
-        super(MessageWeightingFunction, self).__init__()
-        self.relation_embed_dim = relation_embed_dim
-        self.attention_dim = attention_dim
-        self.Q = nn.Linear(relation_embed_dim, attention_dim, bias=False)
-        self.K = nn.Linear(relation_embed_dim, attention_dim, bias=False)
-        self.softmax = nn.Softmax(dim=0)
-
-    def forward(self, relation_embeds: Tensor, queries: Tensor):
-        query_idxs = queries.nonzero(as_tuple=False).flatten()
-        value_idxs = torch.roll(queries, shifts=1)
-        value_idxs[0] = 0
-        X_attn_idxs = torch.cumsum(value_idxs, dim=0)
-        Y_attn_idxs = torch.arange(relation_embeds.shape[0])
-
-        Q = self.Q(relation_embeds)
-        K = self.K(relation_embeds)
-        Q_query = Q[query_idxs]
-        attn_matrix = torch.matmul(K, Q_query.T) / math.sqrt(self.attention_dim)
-
-        negative_y, negative_x = torch.where(attn_matrix < 0)
-        mask = torch.full(attn_matrix.shape, -1e+30, device=attn_matrix.device)
-        mask[negative_y, negative_x] = 1e+30
-        mask[Y_attn_idxs, X_attn_idxs] = 1
-
-        attn_scores = attn_matrix * mask.detach()
-        attn_scores = self.softmax(attn_scores)
-        attn_scores = attn_scores[Y_attn_idxs, X_attn_idxs]
-
-        return attn_scores
+        return messages
 
 
 class MessagePassingLayer(nn.Module):
-    def __init__(self, embed_dim: int, message_weighting_function=None):
+    def __init__(self, embed_dim: int):
         super(MessagePassingLayer, self).__init__()
         self.embed_dim = embed_dim
-        self.calc_messages_fwd = MessageCalculationLayer(embed_dim, message_weighting_function)
-        self.calc_messages_back = MessageCalculationLayer(embed_dim, message_weighting_function)
+        self.calc_messages_fwd = MessageCalculationLayer(embed_dim)
+        self.calc_messages_back = MessageCalculationLayer(embed_dim)
         self.norm = nn.LayerNorm(embed_dim)
         self.act = nn.LeakyReLU()
 
@@ -203,8 +168,7 @@ class RelationCorrelationModel(nn.Module):
 
 
 class KGCompletionGNN(nn.Module):
-    def __init__(self, relation_feat, input_dim: int, embed_dim: int, num_layers: int, norm=2, edge_attention=False,
-                 decoder: str = "MLP+TransE"):
+    def __init__(self, relation_feat, input_dim: int, embed_dim: int, num_layers: int, norm: int=2, decoder: str = "MLP+TransE"):
         super(KGCompletionGNN, self).__init__()
 
         local_vals = locals()
@@ -225,7 +189,6 @@ class KGCompletionGNN(nn.Module):
 
         self.entity_input_transform = nn.Linear(input_dim, embed_dim)
 
-        self.message_weighting_function = MessageWeightingFunction(embed_dim, embed_dim // 2) if edge_attention else None
         self.norm_entity = nn.LayerNorm(embed_dim)
         self.norm_edge = nn.LayerNorm(embed_dim)
 
@@ -233,7 +196,7 @@ class KGCompletionGNN(nn.Module):
         self.edge_update_layers = nn.ModuleList()
 
         for i in range(num_layers):
-            self.message_passing_layers.append(MessagePassingLayer(embed_dim, message_weighting_function=self.message_weighting_function))
+            self.message_passing_layers.append(MessagePassingLayer(embed_dim))
             self.edge_update_layers.append(EdgeUpdateLayer(embed_dim))
 
         self.relation_correlation_model = RelationCorrelationModel(relation_feat.shape[0], embed_dim)
