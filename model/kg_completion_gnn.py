@@ -184,10 +184,12 @@ class KGCompletionGNN(nn.Module):
         self.relation_embedding.weight.requires_grad = False  # Comment to learn through message passing relation embedding table
         self.relative_direction_embedding = nn.Embedding(2, embed_dim)
         self.head_or_tail_edge_embedding = nn.Embedding(2, embed_dim)
+        self.indeg_embedding = nn.Embedding(7, embed_dim)
+        self.outdeg_embedding = nn.Embedding(7, embed_dim)
 
         self.edge_input_transform = nn.Linear(relation_feat.shape[1], embed_dim)
 
-        self.entity_input_transform = nn.Linear(input_dim + 14, embed_dim)
+        self.entity_input_transform = nn.Linear(input_dim, embed_dim)
 
         self.norm_entity = nn.LayerNorm(embed_dim)
         self.norm_edge = nn.LayerNorm(embed_dim)
@@ -208,13 +210,14 @@ class KGCompletionGNN(nn.Module):
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
 
-    def forward(self, ht: Tensor, r_tensor: Tensor, r_query: Tensor, entity_feat: Tensor, r_relative, h_or_t_sample, indeg_feat, outdeg_feat, queries: Tensor):
+    def forward(self, ht: Tensor, r_tensor: Tensor, r_query: Tensor, entity_feat: Tensor, r_relative, h_or_t_sample, indeg_cats, outdeg_cats, queries: Tensor):
         # Transform entities
 
-        augmented_entity_feat = torch.cat([entity_feat, indeg_feat, outdeg_feat], dim=1)
-        H_0 = self.act(self.entity_input_transform(augmented_entity_feat))
+        indeg_embed = self.indeg_embedding(indeg_cats)
+        outdeg_embed = self.outdeg_embedding(outdeg_cats)
+        H_0 = self.act(self.entity_input_transform(entity_feat))
         H_0 = self.norm_entity(H_0)
-        H = H_0
+        H = H_0 + indeg_embed + outdeg_embed
 
         # Transform relations
         r_embed = self.relation_embedding(r_tensor)
