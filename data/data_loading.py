@@ -8,20 +8,20 @@ from data import data_processing
 from data.left_contiguous_csr import LeftContiguousCSR
 
 
-class WikiKG90MProcessedDataset(Dataset):
+class KGProcessedDataset(Dataset):
     """WikiKG90M processed dataset."""
 
-    def __init__(self, root_data_dir: str = None, from_dataset: WikiKG90MDataset = None):
+    def __init__(self, root_data_dir: str = None, dataset_name: str = None, from_dataset: WikiKG90MDataset = None):
         """
         Args:
             root_data_dir (str): Root data dir containing the processed WikiKG90M dataset.
         """
-        assert root_data_dir is not None or from_dataset is not None, \
-            "Must initiate WikiKG90MProcessedDataset with data dir or from_dataset."
+        assert (root_data_dir is not None and dataset_name) is not None or from_dataset is not None, \
+            "Must initiate KGProcessedDataset with (data dir + dataset name) or from_dataset."
         if from_dataset:
             dataset = from_dataset
         else:
-            dataset = data_processing.load_processed_data(root_data_dir)
+            dataset = data_processing.load_processed_data(root_data_dir, dataset_name)
         self.num_entities = dataset.num_entities
         self.train_ht = dataset.train_ht
         self.train_r = dataset.train_r
@@ -32,6 +32,8 @@ class WikiKG90MProcessedDataset(Dataset):
         self.edge_lccsr: LeftContiguousCSR = dataset.edge_lccsr
         self.relation_lccsr: LeftContiguousCSR = dataset.relation_lccsr
         self.degrees = dataset.degrees
+        self.indegrees = dataset.indegrees
+        self.outdegrees = dataset.outdegrees
         self.feature_dim = self.entity_feat.shape[1]
         self.valid_dict = dataset.valid_dict
         self.test_dict = dataset.test_dict
@@ -41,7 +43,7 @@ class WikiKG90MProcessedDataset(Dataset):
         """Load directly from results of data_processing.load_processed_data
         Primarily used for development purposes.
         """
-        return WikiKG90MProcessedDataset("", from_dataset=processed_dataset)
+        return KGProcessedDataset("", from_dataset=processed_dataset)
 
     def __len__(self):
         return len(self.train_ht)
@@ -182,28 +184,40 @@ class WikiKG90MProcessedDataset(Dataset):
             ht_tensor = torch.from_numpy(np.stack([edge_heads, edge_tails]).transpose()).long()
             r_tensor = torch.from_numpy(np.array(edge_relations)).long()
             entity_set = torch.from_numpy(np.array(batch_id_to_node_id)).long()
+
+            indeg = self.indegrees[entity_set]
+            outdeg = self.outdegrees[entity_set]
+            indeg_feat = np.stack([indeg // 10**i for i in range(0, 7)]).astype(np.bool).astype(np.int32).T
+            outdeg_feat = np.stack([outdeg // 10 ** i for i in range(0, 7)]).astype(np.bool).astype(np.int32).T
+            indeg_feat = torch.from_numpy(indeg_feat).float()
+            outdeg_feat = torch.from_numpy(outdeg_feat).float()
+
             entity_feat = None  # TODO: Remove this
             queries = torch.from_numpy(np.array(is_query)).long()
             labels = torch.from_numpy(np.array(labels)).long()
             r_queries = torch.from_numpy(np.array(r_queries)).long()
             r_relatives = torch.from_numpy(np.array(r_relatives)).long()
             h_or_t_sample = torch.from_numpy(np.array(h_or_t_sample)).long()
-            return ht_tensor, r_tensor, entity_set, entity_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
+            return ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
         return wikikg_collate_fn
 
 
-def load_dataset(root_data_dir: str):
-    return WikiKG90MProcessedDataset(root_data_dir)
+def load_dataset(root_data_dir: str, dataset_name: str):
+    return KGProcessedDataset(root_data_dir=root_data_dir, dataset_name=dataset_name)
 
 
-class Wiki90MEvaluationDataset(Dataset):
+class KGEvaluationDataset(Dataset):
 
-    def __init__(self, full_dataset: WikiKG90MProcessedDataset, task):
+    def __init__(self, full_dataset: KGProcessedDataset, task, num_candidates_per_itr=None):
         self.ds = full_dataset
         self.task = task
         self.hr = task['hr']
         self.t_candidate = task['t_candidate']
+        self.t_candidate_filter_mask = None
+        if 't_candidate_filter_mask' in task:
+            self.t_candidate_filter_mask = task['t_candidate_filter_mask']
         self.t_correct_index = None
+        self.num_candidates_per_itr = num_candidates_per_itr
 
     def __len__(self):
         return len(self.hr)
@@ -215,9 +229,10 @@ class Wiki90MEvaluationDataset(Dataset):
         batch_h = self.hr[idx][0]
         batch_r = self.hr[idx][1]
         batch_t_candidate = self.t_candidate[idx]
+        batch_t_candidate_filter_mask = self.t_candidate_filter_mask[idx] if self.t_candidate_filter_mask is not None else None
         t_correct_idx = self.t_correct_index[idx] if self.t_correct_index is not None else None
 
-        return batch_h, batch_r, batch_t_candidate, t_correct_idx
+        return batch_h, batch_r, batch_t_candidate, batch_t_candidate_filter_mask, t_correct_idx
 
     def sub_batch_loader(self, batch):
         pass
@@ -225,36 +240,50 @@ class Wiki90MEvaluationDataset(Dataset):
     def get_eval_collate_fn(self, max_neighbors=10):
         def collate_fn(batch):
             hrt_collate = self.ds.get_collate_fn(max_neighbors=max_neighbors)
-
             batch_h = array("i")
             batch_r = array("i")
             batch_t_candidates = []
+            batch_t_filter_masks = []
             t_correct_idx = array("i")
-            for _h, _r, _t_candidates, _t_correct in batch:
+            for _h, _r, _t_candidates, _t_candidates_filter_mask, _t_correct in batch:
                 batch_h.append(_h)
                 batch_r.append(_r)
                 batch_t_candidates.append(_t_candidates)
+                if _t_candidates_filter_mask is not None:
+                    batch_t_filter_masks.append(_t_candidates_filter_mask)
                 if _t_correct is not None:
                     t_correct_idx.append(_t_correct)
 
-            out_batch = hrt_collate(list(zip(batch_h, batch_r, batch_t_candidates)))
+            out_batches = []
+            if self.num_candidates_per_itr is not None:
+                for i in range(0, batch_t_candidates[0].shape[0], self.num_candidates_per_itr):
+                    subbatch_t_candidates = [batch_t_candidates[e][i:i+self.num_candidates_per_itr] for e in range(len(batch_t_candidates))]
+                    subbatch = hrt_collate(list(zip(batch_h, batch_r, subbatch_t_candidates)))
+                    out_batches.append(subbatch)
+            else:
+                out_batches.append(hrt_collate(list(zip(batch_h, batch_r, batch_t_candidates))))
 
-            t_correct_idx = np.array(t_correct_idx) if isinstance(self, Wiki90MValidationDataset) else None
+            t_correct_idx = np.array(t_correct_idx) if isinstance(self, KGValidationDataset) else None
+            batch_t_filter_masks = np.array(batch_t_filter_masks) if self.t_candidate_filter_mask is not None else None
 
-            return out_batch, t_correct_idx
+            return out_batches, t_correct_idx, batch_t_filter_masks
 
         return collate_fn
 
 
-class Wiki90MValidationDataset(Wiki90MEvaluationDataset):
-    def __init__(self, full_dataset: WikiKG90MProcessedDataset):
-        super(Wiki90MValidationDataset, self).__init__(full_dataset, full_dataset.valid_dict['h,r->t'])
+class KGValidationDataset(KGEvaluationDataset):
+    def __init__(self, full_dataset: KGProcessedDataset, num_candidates_per_itr=1001):
+        super(KGValidationDataset, self).__init__(full_dataset, full_dataset.valid_dict['h,r->t'],
+                                                  num_candidates_per_itr=num_candidates_per_itr)
         self.t_correct_index = self.task['t_correct_index']
 
 
-class Wiki90MTestDataset(Wiki90MEvaluationDataset):
-    def __init__(self, full_dataset: WikiKG90MProcessedDataset):
-        super(Wiki90MTestDataset, self).__init__(full_dataset, full_dataset.test_dict['h,r->t'])
+class KGTestDataset(KGEvaluationDataset):
+    def __init__(self, full_dataset: KGProcessedDataset, num_candidates_per_itr=1001):
+        super(KGTestDataset, self).__init__(full_dataset, full_dataset.test_dict['h,r->t'],
+                                            num_candidates_per_itr=num_candidates_per_itr)
+        if 't_correct_index' in self.task:
+            self.t_correct_index = self.task['t_correct_index']
 
 
 

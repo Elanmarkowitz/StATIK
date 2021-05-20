@@ -3,6 +3,7 @@ import os
 import numpy as np
 import array
 from typing import Union
+import pickle
 
 import tqdm
 from ogb.lsc import WikiKG90MDataset
@@ -31,6 +32,7 @@ def load_original_data(root_data_dir: str, dataset_name: str) -> ProcessableData
     else:
         raise Exception('Dataset not known.')
 
+
 def get_filtered_candidate(queries, true_triples, num_entities):
     candidates = np.tile(np.arange(0, num_entities), queries.shape[0])
     A = np.append(np.repeat(queries, num_entities, axis=0), candidates[:, np.newaxis], axis=1)
@@ -39,7 +41,6 @@ def get_filtered_candidate(queries, true_triples, num_entities):
     idx = np.nonzero(np.in1d(A.view(dt).reshape(-1), np.ascontiguousarray(true_triples).view(dt).reshape(-1)))[0]
     candidates[idx] = -1
     return candidates
-
 
 
 def process_data(root_data_dir: str, dataset_name: str) -> None:
@@ -68,15 +69,21 @@ def process_data(root_data_dir: str, dataset_name: str) -> None:
     edge_dict = defaultdict(lambda: array.array('i')) # sp.dok_matrix((dataset.num_entities, dataset.num_entities), dtype=np.int64)
     relation_dict = defaultdict(lambda: array.array('i')) # sp.dok_matrix((dataset.num_entities, dataset.num_entities), dtype=np.int64)
     degrees = np.zeros((dataset.num_entities,), dtype=np.int32)
+    indegrees = np.zeros((dataset.num_entities,), dtype=np.int32)
+    outdegrees = np.zeros((dataset.num_entities,), dtype=np.int32)
     print("Building edge dict.")
     for i in tqdm.tqdm(range(len(train_ht))):
         h,r,t,r_inv = int(train_ht[i][0]), int(train_r[i]), int(train_ht[i][1]), int(train_r_inverse[i])
         edge_dict[h].append(t)
         relation_dict[h].append(r)
         degrees[h] = degrees[h] + 1
+        outdegrees[h] = outdegrees[h] + 1
+
         edge_dict[t].append(h)
         relation_dict[t].append(r_inv)
         degrees[t] = degrees[t] + 1
+        indegrees[t] = indegrees[t] + 1
+
     edge_dict = dict(edge_dict)
     relation_dict = dict(relation_dict)
     print("Converting to np arrays.")
@@ -122,31 +129,33 @@ def process_data(root_data_dir: str, dataset_name: str) -> None:
     # with open(os.path.join(save_dir, 'relation_dict.pkl'), 'wb') as f:
     #     pickle.dump(relation_dict, f)
     np.save(os.path.join(save_dir, 'degrees.npy'), degrees)
+    np.save(os.path.join(save_dir, 'indegrees.npy'), indegrees)
+    np.save(os.path.join(save_dir, 'outdegrees.npy'), outdegrees)
 
-    total = np.concatenate((dataset.train_hrt,
-        dataset.valid_hrt,
-        dataset.test_hrt), axis=0
-        )
+    if hasattr(dataset, 'valid_hrt') or hasattr(dataset, 'test_hrt'):
+        total = np.concatenate((dataset.train_hrt, dataset.valid_hrt, dataset.test_hrt), axis=0)
     if hasattr(dataset, 'valid_hrt'):
         num_valid = dataset.valid_hrt[:, [0, 1]].shape[0]
         valid_cand = np.tile(np.arange(0, dataset.num_entities), num_valid)
         filtered_cand = get_filtered_candidate(dataset.valid_hrt[:, [0, 1]], total, dataset.num_entities)
-        valid_task = {'h,r->t': {
+        valid_dict = {'h,r->t': {
             'hr': dataset.valid_hrt[:, [0, 1]],
             't_candidate': valid_cand.reshape((num_valid, dataset.num_entities)),  # this needs to be repeated for each validation triple shape: (num valid, num_entities)
             't_candidate_filter_mask': filtered_cand.reshape((num_valid, dataset.num_entities)),
-            't_correct': dataset.valid_hrt[:, 2]
+            't_correct_index': dataset.valid_hrt[:, 2]
         }}
+        pickle.dump(valid_dict, open(os.path.join(save_dir, 'valid_dict.pkl'), 'wb'))
     if hasattr(dataset, 'test_hrt'):
         num_test = dataset.test_hrt[:, [0, 1]].shape[0]
         test_cand = np.tile(np.arange(0, dataset.num_entities), num_test)
         filtered_cand = get_filtered_candidate(dataset.test_hrt[:, [0, 1]], total, dataset.num_entities)
-        test_task = {'h,r->t': {
+        test_dict = {'h,r->t': {
             'hr': dataset.test_hrt[:, [0, 1]],
             't_candidate': test_cand.reshape((num_test, dataset.num_entities)),
             't_candidate_filter_mask': filtered_cand.reshape((num_test, dataset.num_entities)),
-            't_correct': dataset.test_hrt[:, 2]
+            't_correct_index': dataset.test_hrt[:, 2]
         }}
+        pickle.dump(test_dict, open(os.path.join(save_dir, 'test_dict.pkl'), 'wb'))
 
 
 def load_processed_data(root_data_dir: str, dataset_name: str) -> WikiKG90MDataset:
@@ -154,6 +163,8 @@ def load_processed_data(root_data_dir: str, dataset_name: str) -> WikiKG90MDatas
     print('Loading processed dataset.')
     dataset = load_original_data(root_data_dir, dataset_name)
     dataset.degrees = np.load(os.path.join(save_dir, 'degrees.npy'))
+    dataset.indegrees = np.load(os.path.join(save_dir, 'indegrees.npy'))
+    dataset.outdegrees = np.load(os.path.join(save_dir, 'outdegrees.npy'))
     # dataset.train_ht_inverse = np.load(os.path.join(save_dir, 'train_ht_inverse.npy'))
     # dataset.train_r_inverse = np.load(os.path.join(save_dir, 'train_r_inverse.npy'))
     dataset.train_ht = dataset.train_hrt[:, [0,2]].astype(np.int32)
@@ -168,5 +179,9 @@ def load_processed_data(root_data_dir: str, dataset_name: str) -> WikiKG90MDatas
     # dataset.relation_csr = sp.load_npz(os.path.join(save_dir, 'rel_csr.npz'))
     dataset.edge_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, 'edge_lccsr.npz'))
     dataset.relation_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, 'rel_lccsr.npz'))
+    if os.path.isfile(os.path.join(save_dir, 'valid_dict.pkl')):
+        dataset.valid_dict = pickle.load(open(os.path.join(save_dir, 'valid_dict.pkl'), 'rb'))
+    if os.path.isfile(os.path.join(save_dir, 'test_dict.pkl')):
+        dataset.test_dict = pickle.load(open(os.path.join(save_dir, 'test_dict.pkl'), 'rb'))
     return dataset
 
