@@ -187,7 +187,7 @@ class KGCompletionGNN(nn.Module):
 
         self.edge_input_transform = nn.Linear(relation_feat.shape[1], embed_dim)
 
-        self.entity_input_transform = nn.Linear(input_dim, embed_dim)
+        self.entity_input_transform = nn.Linear(input_dim + 14, embed_dim)
 
         self.norm_entity = nn.LayerNorm(embed_dim)
         self.norm_edge = nn.LayerNorm(embed_dim)
@@ -208,10 +208,11 @@ class KGCompletionGNN(nn.Module):
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
 
-    def forward(self, ht: Tensor, r_tensor: Tensor, r_query: Tensor, entity_feat: Tensor, r_relative, h_or_t_sample, queries: Tensor):
+    def forward(self, ht: Tensor, r_tensor: Tensor, r_query: Tensor, entity_feat: Tensor, r_relative, h_or_t_sample, indeg_feat, outdeg_feat, queries: Tensor):
         # Transform entities
 
-        H_0 = self.act(self.entity_input_transform(entity_feat))
+        augmented_entity_feat = torch.cat([entity_feat, indeg_feat, outdeg_feat], dim=1)
+        H_0 = self.act(self.entity_input_transform(augmented_entity_feat))
         H_0 = self.norm_entity(H_0)
         H = H_0
 
