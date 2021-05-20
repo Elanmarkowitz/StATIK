@@ -130,21 +130,11 @@ if __name__ == '__main__':
     result = evaluator.eval(input_dict)
     print(result)
 
-    t_correct_index = torch.from_numpy(t_correct_index)
-    t_pred_top10 = torch.from_numpy(t_pred_top10)
 
-    input_dict = {}
-    input_dict['h,r->t'] = {'t_correct_index': t_correct_index, 't_pred_top10': t_pred_top10}
-    result = evaluator.eval(input_dict)
-    print(result)
-
-    input_dict = {}
-    input_dict['h,r->t'] = {'t_pred_top10': np.random.randint(0, 1001, size=(1359303, 10))}
-    # evaluator.save_test_submission(input_dict, 'result')
-
-    # print(dataset.all_entity_feat)
-    # print(dataset.all_entity_feat.shape)
-
+    # analyze results example
+    bins = [0, 30, 50, 100, 200]
+    rel_freq = np.random.randint(0, 200, dataset.num_relations)
+    evaluator.analyze_groups(result[2], stats=rel_freq, bins=bins)
 
 
 
