@@ -31,6 +31,7 @@ class KGProcessedDataset(Dataset):
         self.relation_feat = dataset.relation_feat  # feature matrix for relation types   # unused in loader
         self.edge_lccsr: LeftContiguousCSR = dataset.edge_lccsr
         self.relation_lccsr: LeftContiguousCSR = dataset.relation_lccsr
+        self.rel_pattern_lccsr: LeftContiguousCSR = dataset.rel_pattern_lccsr
         self.degrees = dataset.degrees
         self.indegrees = dataset.indegrees
         self.outdegrees = dataset.outdegrees
@@ -147,6 +148,8 @@ class KGProcessedDataset(Dataset):
             # 1-hop connected entities included
             batch_id_to_node_id = array("i")
             node_id_to_batch_id = np.empty((self.num_entities,), dtype=np.int64)
+            original_h = array("i")
+            original_t = array("i")
             edge_heads = array("i")
             edge_tails = array("i")
             edge_relations = array("i")
@@ -169,6 +172,8 @@ class KGProcessedDataset(Dataset):
                 rels_h, tails_h = self.sample_neighbors(_h, max_neighbors)
 
                 for _t, _label in zip(t_candidates, sample_labels):
+                    original_h.append(_h)
+                    original_t.append(_t)
 
                     rels_t, tails_t = self.sample_neighbors(_t, max_neighbors)
 
@@ -192,13 +197,20 @@ class KGProcessedDataset(Dataset):
             indeg_feat = torch.from_numpy(indeg_feat).float()
             outdeg_feat = torch.from_numpy(outdeg_feat).float()
 
+            rel_patterns = np.zeros((len(labels), 2, self.num_relations * 2), dtype=np.bool)
+            for i, (h, t) in enumerate(np.stack([original_h, original_t], axis=1)):
+                rel_patterns[i, 0, self.rel_pattern_lccsr[h]] = True
+                rel_patterns[i, 1, self.rel_pattern_lccsr[t]] = True
+            rel_patterns = rel_patterns.reshape((len(labels), 4, self.num_relations))
+
             entity_feat = None  # TODO: Remove this
+            rel_patterns = torch.from_numpy(rel_patterns).long()
             queries = torch.from_numpy(np.array(is_query)).long()
             labels = torch.from_numpy(np.array(labels)).long()
             r_queries = torch.from_numpy(np.array(r_queries)).long()
             r_relatives = torch.from_numpy(np.array(r_relatives)).long()
             h_or_t_sample = torch.from_numpy(np.array(h_or_t_sample)).long()
-            return ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
+            return ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample, rel_patterns
         return wikikg_collate_fn
 
 

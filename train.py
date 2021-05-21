@@ -56,18 +56,18 @@ CHECKPOINT_DIR = "checkpoints"
 
 
 def prepare_batch_for_model(batch, dataset: KGProcessedDataset, save_batch=False):
-    ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
+    ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample, rel_patterns = batch
     if entity_feat is None:
         entity_feat = torch.from_numpy(dataset.entity_feat[entity_set]).float()
 
-    batch = ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
+    batch = ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample, rel_patterns
     if save_batch:
         pickle.dump(batch, open('sample_batch.pkl', 'wb'))
     return batch
 
 
 def move_batch_to_device(batch, device):
-    ht_tensor, r_tensor, entity_set, entity_feat,  indeg_feat, outdeg_feat,queries, labels, r_queries, r_relatives, h_or_t_sample = batch
+    ht_tensor, r_tensor, entity_set, entity_feat,  indeg_feat, outdeg_feat,queries, labels, r_queries, r_relatives, h_or_t_sample, rel_patterns = batch
     ht_tensor = ht_tensor.to(device)
     r_tensor = r_tensor.to(device)
     entity_feat = entity_feat.to(device)
@@ -78,7 +78,8 @@ def move_batch_to_device(batch, device):
     r_queries = r_queries.to(device)
     r_relatives = r_relatives.to(device)
     h_or_t_sample = h_or_t_sample.to(device)
-    batch = ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
+    rel_patterns = rel_patterns.to(device)
+    batch = ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample, rel_patterns
     return batch
 
 
@@ -125,11 +126,9 @@ def train(global_rank, local_rank, world):
             ddp_model.train()
             batch = prepare_batch_for_model(batch, dataset)
             batch = move_batch_to_device(batch, local_rank)
-            ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
-            scores = ddp_model(ht_tensor, r_tensor, r_queries, entity_feat, r_relatives, h_or_t_sample, queries)
-
+            ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample, rel_patterns = batch
+            scores = ddp_model(ht_tensor, r_tensor, r_queries, entity_feat, r_relatives, h_or_t_sample, queries, rel_patterns)
             loss = loss_fn(scores, labels.float())
-
             moving_average_loss = .999 * moving_average_loss + 0.001 * loss.detach()
 
             if (i + 1) % FLAGS.print_freq == 0:
@@ -170,7 +169,7 @@ def train_inner(model, train_loader, opt, dataset, device, print_output=True):
         model.train()
         batch = prepare_batch_for_model(batch, dataset)
         batch = move_batch_to_device(batch, device)
-        ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
+        ht_tensor, r_tensor, entity_set, entity_feat, relation_feat, queries, labels, r_queries, r_relatives, h_or_t_sample, rel_patterns = batch
         preds = model(ht_tensor, r_tensor, entity_feat, relation_feat, queries)
         loss = F.binary_cross_entropy_with_logits(preds.flatten(), labels.float())
 
@@ -276,8 +275,8 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
             for subbatch in subbatches:
                 subbatch = prepare_batch_for_model(subbatch, dataset.ds)
                 subbatch = move_batch_to_device(subbatch, local_rank)
-                ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, _, r_queries, r_relatives, h_or_t_sample = subbatch
-                subbatch_preds = model(ht_tensor, r_tensor, r_queries, entity_feat, r_relatives, h_or_t_sample, queries)
+                ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, _, r_queries, r_relatives, h_or_t_sample, rel_patterns = subbatch
+                subbatch_preds = model(ht_tensor, r_tensor, r_queries, entity_feat, r_relatives, h_or_t_sample, queries, rel_patterns)
                 subbatch_preds = subbatch_preds.reshape(dataloader.batch_size, -1)  # TODO: inferring number of candidates, check that this is right.
                 preds.append(subbatch_preds)
             preds = torch.cat(preds, dim=1)
