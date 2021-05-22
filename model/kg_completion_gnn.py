@@ -128,31 +128,34 @@ class RelationCorrelationModel(nn.Module):
     def __init__(self, num_relations: int, embed_dim: int):
         super(RelationCorrelationModel, self).__init__()
         self.num_relations = num_relations
-        self.apply_correlation_embedding = nn.Linear(num_relations, embed_dim, bias=False)
+        self.apply_relation_embedding = nn.Linear(num_relations, embed_dim, bias=False)
         self.pattern_transform = nn.ModuleList([
             nn.Linear(embed_dim, embed_dim),
             nn.Linear(embed_dim, embed_dim),
-            nn.Linear(embed_dim, embed_dim),
-            nn.Linear(embed_dim, embed_dim)
+            # nn.Linear(embed_dim, embed_dim),
+            # nn.Linear(embed_dim, embed_dim)
         ])
-        self.correlation_weight_table = nn.Parameter(torch.ones(num_relations, 4, num_relations).float())
-        self.final_embedding = nn.Linear(2 * embed_dim, embed_dim)
-        self.final_score = nn.Linear(embed_dim, 1)
+        # self.correlation_weight_table = nn.Parameter(torch.ones(num_relations, 2, num_relations).float())
+        self.final_embedding = nn.Linear(embed_dim, embed_dim)
+        self.norm = nn.LayerNorm(embed_dim)
+        # self.final_score = nn.Linear(embed_dim, 1)
+        self.act = nn.LeakyReLU()
 
-    def forward(self, rel_patterns: Tensor, r_q: Tensor):
-        raw_corr_weights = torch.abs(self.correlation_weight_table[r_q])
-        correlation_weights = raw_corr_weights / raw_corr_weights.sum(2).unsqueeze(2)
-        correlated_pattern = correlation_weights * rel_patterns  # B, 4, num_relations
-        embedded_cor_pattern = self.apply_correlation_embedding(correlated_pattern)  # B, 4, embed dim
+    def forward(self, rel_patterns: Tensor):
+        # raw_corr_weights = torch.abs(self.correlation_weight_table[r_q])
+        # correlation_weights = raw_corr_weights / raw_corr_weights.sum(2).unsqueeze(2)
+        # correlated_pattern = correlation_weights * rel_patterns  # B, 4, num_relations
+        rel_patterns = rel_patterns / rel_patterns.sum(2).unsqueeze(2)
+        embedded_cor_pattern = self.apply_relation_embedding(rel_patterns)  # B, 4, embed dim
         transformed_patterns = []
         for i, transform in enumerate(self.pattern_transform):
             transformed_patterns.append(transform(embedded_cor_pattern[:,i]))  # B, embed dim
         transformed_patterns = torch.stack(transformed_patterns, dim=1)  # B, 4, embed dim
         topology_embedding = transformed_patterns.mean(1)  # B, embed dim
-        r_q_onehot = torch.eye(self.num_relations, device=r_q.device)[r_q]  # B, num relations
-        r_q_embed = self.apply_correlation_embedding(r_q_onehot)  # B, embed dim
-        final_embed = self.final_embedding(torch.cat([r_q_embed, topology_embedding], dim=1))  # B, 2 embed dim
-        return self.final_score(final_embed)
+        # r_q_onehot = torch.eye(self.num_relations, device=r_q.device)[r_q]  # B, num relations
+        # r_q_embed = self.apply_correlation_embedding(r_q_onehot)  # B, embed dim
+        # final_embed = self.final_embedding(torch.cat([r_q_embed, topology_embedding], dim=1))  # B, 2 embed dim
+        return topology_embedding
 
 
 class KGCompletionGNN(nn.Module):
@@ -187,7 +190,7 @@ class KGCompletionGNN(nn.Module):
             self.message_passing_layers.append(MessagePassingLayer(embed_dim))
             self.edge_update_layers.append(EdgeUpdateLayer(embed_dim))
 
-        self.relation_correlation_model = RelationCorrelationModel(relation_feat.shape[0], embed_dim)
+        # self.relation_correlation_model = RelationCorrelationModel(relation_feat.shape[0], embed_dim)
 
         self.decoder = decoder
         self.classify_triple = TripleClassificationLayer(embed_dim)
@@ -199,6 +202,8 @@ class KGCompletionGNN(nn.Module):
     def forward(self, ht: Tensor, r_tensor: Tensor, r_query: Tensor, entity_feat: Tensor, r_relative, h_or_t_sample,
                 queries: Tensor, rel_patterns: Tensor):
         # Transform entities
+
+        # topology_embedding = self.relation_correlation_model(rel_patterns)
 
         H_0 = self.act(self.entity_input_transform(entity_feat))
         H_0 = self.norm_entity(H_0)
@@ -221,15 +226,15 @@ class KGCompletionGNN(nn.Module):
         elif self.decoder == "TransE":
             out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
         elif self.decoder == "MLP+TransE":
-            mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
-            transe_out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
-            return mlp_out + transe_out
-            # if self.training:
-            #     mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
-            #     transe_out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
-            #     out = (mlp_out.flatten(), transe_out)
-            # else:
-            #     out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
+            # mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
+            # transe_out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
+            # return mlp_out + transe_out
+            if self.training:
+                mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
+                transe_out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
+                out = (mlp_out.flatten(), transe_out)
+            else:
+                out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
         elif self.decoder == "RelCorr+TransE":
             rel_corr_score = self.relation_correlation_model(rel_patterns, r_query[queries.bool()]).flatten()
             transe_out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
@@ -258,7 +263,7 @@ class KGCompletionGNN(nn.Module):
             return self.margin_ranking_loss
         elif self.decoder == "MLP+TransE":
             self.margin = margin
-            return self.combo_loss_one_score
+            return self.combo_loss
         elif self.decoder == "RelCorr+TransE":
             self.margin = margin
             return self.margin_ranking_loss

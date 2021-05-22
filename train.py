@@ -78,7 +78,7 @@ def move_batch_to_device(batch, device):
     r_queries = r_queries.to(device)
     r_relatives = r_relatives.to(device)
     h_or_t_sample = h_or_t_sample.to(device)
-    rel_patterns = rel_patterns.to(device)
+    # rel_patterns = rel_patterns.to(device)
     batch = ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample, rel_patterns
     return batch
 
