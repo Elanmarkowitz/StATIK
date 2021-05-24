@@ -193,12 +193,12 @@ class KGProcessedDataset(Dataset):
             outdeg_feat = torch.from_numpy(outdeg_feat).float()
 
             rel_patterns = np.zeros((len(batch_id_to_node_id), self.num_relations * 2), dtype=np.bool)
-            # for i, (node) in enumerate(batch_id_to_node_id):
-            #     rel_patterns[i, self.rel_pattern_lccsr[node]] = True
+            for i, (node) in enumerate(batch_id_to_node_id):
+                rel_patterns[i, self.rel_pattern_lccsr[node]] = True
             rel_patterns = rel_patterns.reshape((len(batch_id_to_node_id), 2, self.num_relations))
 
             entity_feat = None  # TODO: Remove this
-            rel_patterns = torch.from_numpy(rel_patterns).long()
+            rel_patterns = torch.from_numpy(rel_patterns).bool()
             queries = torch.from_numpy(np.array(is_query)).long()
             labels = torch.from_numpy(np.array(labels)).long()
             r_queries = torch.from_numpy(np.array(r_queries)).long()

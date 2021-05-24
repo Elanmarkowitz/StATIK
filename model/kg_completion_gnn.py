@@ -145,7 +145,8 @@ class RelationCorrelationModel(nn.Module):
         # raw_corr_weights = torch.abs(self.correlation_weight_table[r_q])
         # correlation_weights = raw_corr_weights / raw_corr_weights.sum(2).unsqueeze(2)
         # correlated_pattern = correlation_weights * rel_patterns  # B, 4, num_relations
-        rel_patterns = rel_patterns / rel_patterns.sum(2).unsqueeze(2)
+        # rel_patterns = rel_patterns / rel_patterns.sum(2).unsqueeze(2)
+        rel_patterns = rel_patterns.float()
         embedded_cor_pattern = self.apply_relation_embedding(rel_patterns)  # B, 4, embed dim
         transformed_patterns = []
         for i, transform in enumerate(self.pattern_transform):
@@ -155,7 +156,7 @@ class RelationCorrelationModel(nn.Module):
         # r_q_onehot = torch.eye(self.num_relations, device=r_q.device)[r_q]  # B, num relations
         # r_q_embed = self.apply_correlation_embedding(r_q_onehot)  # B, embed dim
         # final_embed = self.final_embedding(torch.cat([r_q_embed, topology_embedding], dim=1))  # B, 2 embed dim
-        return topology_embedding
+        return self.norm(self.final_embedding(self.act(topology_embedding)))
 
 
 class KGCompletionGNN(nn.Module):
@@ -190,7 +191,7 @@ class KGCompletionGNN(nn.Module):
             self.message_passing_layers.append(MessagePassingLayer(embed_dim))
             self.edge_update_layers.append(EdgeUpdateLayer(embed_dim))
 
-        # self.relation_correlation_model = RelationCorrelationModel(relation_feat.shape[0], embed_dim)
+        self.relation_correlation_model = RelationCorrelationModel(relation_feat.shape[0], embed_dim)
 
         self.decoder = decoder
         self.classify_triple = TripleClassificationLayer(embed_dim)
@@ -202,11 +203,10 @@ class KGCompletionGNN(nn.Module):
     def forward(self, ht: Tensor, r_tensor: Tensor, r_query: Tensor, entity_feat: Tensor, r_relative, h_or_t_sample,
                 queries: Tensor, rel_patterns: Tensor):
         # Transform entities
-
-        # topology_embedding = self.relation_correlation_model(rel_patterns)
+        topology_embedding = self.relation_correlation_model(rel_patterns)
 
         H_0 = self.act(self.entity_input_transform(entity_feat))
-        H_0 = self.norm_entity(H_0)
+        H_0 = self.norm_entity(H_0) + topology_embedding
         H = H_0
 
         # Transform relations
