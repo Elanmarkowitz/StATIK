@@ -9,7 +9,7 @@ class AttibutedEvaluator:
     def __init__(self):
         pass
 
-    def eval(self, input_dict):
+    def eval(self, input_dict, stats):
         '''
             Format of input_dict:
             - 'h,r->t'
@@ -43,14 +43,16 @@ class AttibutedEvaluator:
         # Get rank
         t_ranks = torch.argsort(t_pred, dim=1)[np.arange(len(t_pred)), t_correct_index]
         t_correct = t_candidate[np.arange(len(t_candidate)), t_correct_index]
-        return self._group_by(hr, t_correct, t_ranks, 'h'), \
-               self._group_by(hr, t_correct, t_ranks, 't'), \
-               self._group_by(hr, t_correct, t_ranks, 'r')
 
-        # g = self._group_by(hr, t_correct, t_ranks, 'r')
-        # bins = [0, 30, 50, 100, 200]
-        # stats = np.random.randint(0, 200, dataset.num_relations)
-        # self.analyze_groups(g, stats, bins)
+        results = []
+        for col_name, col_stats in stats.items():
+            df = self._aggregate_by_stats(hr, t_correct, t_ranks, col_stats, col_name)
+            results.append(self._create_output_dict(df))
+        return results
+
+    @staticmethod
+    def _create_output_dict(df):
+        return df[['stats', 'mrr', 'hit', 'count']].to_dict('record')
 
     def analyze_groups(self, groups, stats, bins):
         '''
@@ -72,17 +74,24 @@ class AttibutedEvaluator:
         hit = np.dot(df['hit'].values, df['count'].values) / df['count'].values.sum()
         return pd.Series([mrr, hit], index=["mrr", "hit"])
 
-
-    def _group_by(self, hr, t, ranks, group_by_column):
+    def _aggregate_by_object(self, hr, t, ranks, group_by_column):
         _data = torch.cat((hr, t[:, np.newaxis], ranks[:, np.newaxis]), dim=1).numpy()
         df = pd.DataFrame(data=_data, columns=['h', 'r', 't', 'ranks'])
         return df.groupby(group_by_column).agg(
-                                    mrr=pd.NamedAgg(column='ranks', aggfunc=self._calculate_mrr),
-                                    hit=pd.NamedAgg(column='ranks', aggfunc=self._calculate_hit),
-                                    count=pd.NamedAgg(column='ranks', aggfunc='count')
-                                        ).rename_axis('symbol').reset_index()
+            mrr=pd.NamedAgg(column='ranks', aggfunc=self._calculate_mrr),
+            hit=pd.NamedAgg(column='ranks', aggfunc=self._calculate_hit),
+            count=pd.NamedAgg(column='ranks', aggfunc='count')
+        ).rename_axis('symbol').reset_index()
 
-
+    def _aggregate_by_stats(self, hr, t, ranks, stats, group_by_column):
+        _data = torch.cat((hr, t[:, np.newaxis], ranks[:, np.newaxis]), dim=1).numpy()
+        df = pd.DataFrame(data=_data, columns=['h', 'r', 't', 'ranks'])
+        df['stats'] = stats[df[group_by_column].values]
+        return df.groupby('stats').agg(
+            mrr=pd.NamedAgg(column='ranks', aggfunc=self._calculate_mrr),
+            hit=pd.NamedAgg(column='ranks', aggfunc=self._calculate_hit),
+            count=pd.NamedAgg(column='ranks', aggfunc='count')
+        ).reset_index()
 
     def _calculate_mrr(self, ranks):
         rr = 1. / (ranks + 1.)
@@ -127,14 +136,22 @@ if __name__ == '__main__':
     input_dict['h,r->t'] = {'t_correct_index': t_correct_index, 't_pred': t_pred_top10}
     input_dict['h,r->t']['hr'] = hr
     input_dict['h,r->t']['t_candidate'] = valid_dict['h,r->t']['t_candidate']
-    result = evaluator.eval(input_dict)
-    print(result)
 
+    rel_freq = np.random.randint(0, 200, dataset.num_relations)
+    stats = {
+        'r': rel_freq
+    }
+    result = evaluator.eval(input_dict, stats)
+    # print(result)
 
     # analyze results example
-    bins = [0, 30, 50, 100, 200]
-    rel_freq = np.random.randint(0, 200, dataset.num_relations)
-    evaluator.analyze_groups(result[2], stats=rel_freq, bins=bins)
+    # bins = list(range(1, 201))
+    # rel_freq = np.random.randint(0, 200, dataset.num_relations)
+    # evaluator.analyze_groups(result[2], stats=rel_freq, bins=bins)
+
+    import IPython;
+
+    IPython.embed()
 
 
 
