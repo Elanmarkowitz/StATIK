@@ -10,16 +10,18 @@ from ogb.lsc import WikiKG90MDataset
 
 from data.left_contiguous_csr import LeftContiguousCSR
 from data.wordnet_processing import ProcessWordNet
+from data.fb15k237_processing import FB15k237Dataset
 
 DATA_DIR = os.environ["DATA_DIR"] if "DATA_DIR" in os.environ else "/data/elanmark"
 
 
 LEGAL_DATASETS = {
     "wikikg90m_kddcup2021",
-    "wordnet-mlj12"
+    "wordnet-mlj12",
+    "FB15k-237"
 }
 
-ProcessableDataset = Union[WikiKG90MDataset, ProcessWordNet]
+ProcessableDataset = Union[WikiKG90MDataset, ProcessWordNet, FB15k237Dataset]
 
 
 def load_original_data(root_data_dir: str, dataset_name: str) -> ProcessableDataset:
@@ -29,6 +31,8 @@ def load_original_data(root_data_dir: str, dataset_name: str) -> ProcessableData
         return WikiKG90MDataset(root=root_data_dir)
     elif dataset_name == "wordnet-mlj12":
         return ProcessWordNet(root_data_dir=root_data_dir)
+    elif dataset_name == "FB15k-237":
+        return FB15k237Dataset(root_data_dir=root_data_dir)
     else:
         raise Exception('Dataset not known.')
 

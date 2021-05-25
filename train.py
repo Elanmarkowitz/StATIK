@@ -296,26 +296,27 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
                 t_corrects.append(t_correct_index)
             if num_batches and num_batches == (i + 1):
                 break
+
             if i % 100 == 0:
-                dist.barrier()
+                dist.barrier(group=world)
 
     t_pred_top10 = torch.cat(top_10s, dim=0)
-    aggregated_top10_preds = gather_results(t_pred_top10, global_rank, gather_sizes, world)
+    aggregated_top10_preds = gather_results(t_pred_top10, global_rank, local_rank, gather_sizes, world)
 
     aggregated_correct_indices = None
     if isinstance(dataset, KGValidationDataset):
         t_correct_index = torch.cat(t_corrects, dim=0)
-        aggregated_correct_indices = gather_results(t_correct_index, global_rank, gather_sizes, world)
+        aggregated_correct_indices = gather_results(t_correct_index, global_rank, local_rank, gather_sizes, world)
 
     aggregated_full_preds = None
     if full_preds:
         full_preds = torch.cat(full_preds, dim=0)
-        aggregated_full_preds = gather_results(full_preds, global_rank, gather_sizes, world)
+        aggregated_full_preds = gather_results(full_preds, global_rank, local_rank, gather_sizes, world)
 
     aggregated_filter_masks = None
     if filter_masks:
         filter_masks = torch.cat(filter_masks, dim=0)
-        aggregated_filter_masks = gather_results(filter_masks, global_rank, gather_sizes, world)
+        aggregated_filter_masks = gather_results(filter_masks, global_rank, local_rank, gather_sizes, world)
 
     return aggregated_top10_preds, aggregated_correct_indices, aggregated_full_preds, aggregated_filter_masks
 
@@ -349,6 +350,7 @@ def test(test_dataset: KGTestDataset, test_dataloader: DataLoader, model, global
                                          num_batches, world)
 
     if global_rank == 0:
+        print('Saving...')
         assert len(top10_preds) == len(test_dataset), f"Number of predictions is {len(top10_preds)}. Size of dataset is {len(test_dataset)}"
         input_dict = {'h,r->t': {'t_pred_top10': top10_preds}}
         evaluator.save_test_submission(input_dict=input_dict, dir_path=FLAGS.test_save_dir)
@@ -366,11 +368,11 @@ def full_evaluation(eval_dataset: KGEvaluationDataset, eval_dataloader: DataLoad
         print(results)
 
 
-def gather_results(data: torch.Tensor, global_rank, gather_sizes, world):
+def gather_results(data: torch.Tensor, global_rank, local_rank, gather_sizes, world):
     gather_list = []
 
     for size in gather_sizes:
-        gather_list.append(torch.empty(size, *data.shape[1:], dtype=data.dtype, device=global_rank))
+        gather_list.append(torch.empty(size, *data.shape[1:], dtype=data.dtype, device=local_rank))
 
     if global_rank == 0:
         gather_list[0] = data
