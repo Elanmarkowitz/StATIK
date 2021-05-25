@@ -24,7 +24,7 @@ class FB15k237Dataset(Dataset):
         else:
             loaded_array = np.load(processed_dataset_dir + '/fb15k237processed.npz')
             self.train_hrt = loaded_array['train_hrt']
-            self.val_hrt = loaded_array['val_hrt']
+            self.valid_hrt = loaded_array['val_hrt']
             self.test_hrt = loaded_array['test_hrt']
             self.entity_feat = loaded_array['entity_feat']
 
