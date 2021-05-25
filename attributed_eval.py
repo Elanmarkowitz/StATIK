@@ -4,7 +4,7 @@ import numpy as np
 from ogb.lsc import WikiKG90MDataset
 
 
-class AttibutedEvaluator:
+class AttributedEvaluator:
 
     def __init__(self):
         pass
@@ -44,10 +44,11 @@ class AttibutedEvaluator:
         t_ranks = torch.argsort(t_pred, dim=1)[np.arange(len(t_pred)), t_correct_index]
         t_correct = t_candidate[np.arange(len(t_candidate)), t_correct_index]
 
-        results = []
-        for col_name, col_stats in stats.items():
+        results = {}
+        for name, col_stats in stats.items():
+            col_name, stat_name = name.split('_')
             df = self._aggregate_by_stats(hr, t_correct, t_ranks, col_stats, col_name)
-            results.append(self._create_output_dict(df))
+            results[name] = self._create_output_dict(df)
         return results
 
     @staticmethod

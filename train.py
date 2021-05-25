@@ -17,6 +17,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader, DistributedSampler, Subset
 from tqdm import tqdm
 
+from attributed_eval import AttributedEvaluator
 from data.data_loading import load_dataset, KGProcessedDataset, KGValidationDataset, KGEvaluationDataset, KGTestDataset
 from evaluation import compute_eval_stats
 from model.kg_completion_gnn import KGCompletionGNN
@@ -290,6 +291,26 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
 
             if use_full_preds:
                 full_preds.append(preds.detach())
+                input_dict = {}
+                input_dict['h,r->t']['t_correct_index'] = dataset.t_correct_index
+                input_dict['h,r->t']['t_pred'] = full_preds
+                input_dict['h,r->t']['hr'] = dataset.hr
+                input_dict['h,r->t']['t_candidate'] = dataset.t_candidate
+
+                stats_dict = {
+                    'r_frequency': None,
+
+                    't_indegree': None,
+                    't_outdegree': None,
+                    't_dgree': None,
+
+                    'h_indegree': None,
+                    'h_outdegree': None,
+                    'h_degree': None
+                }
+
+                attr_evaluator = AttributedEvaluator()
+                results = attr_evaluator.eval(input_dict, stats_dict)
 
             if isinstance(dataset, KGValidationDataset):
                 t_correct_index = torch.tensor(t_correct_index, device=local_rank)
