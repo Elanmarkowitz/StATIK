@@ -300,13 +300,13 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
                 stats_dict = {
                     'r_frequency': None,
 
-                    't_indegree': None,
-                    't_outdegree': None,
-                    't_dgree': None,
+                    't_indegree': dataset.ds.indegrees,
+                    't_outdegree': dataset.ds.outdegrees,
+                    't_dgree': dataset.ds.degrees,
 
-                    'h_indegree': None,
-                    'h_outdegree': None,
-                    'h_degree': None
+                    'h_indegree': dataset.ds.indegrees,
+                    'h_outdegree': dataset.ds.outdegrees,
+                    'h_degree': dataset.ds.degrees
                 }
 
                 attr_evaluator = AttributedEvaluator()
