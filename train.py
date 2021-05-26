@@ -281,7 +281,7 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
                 subbatch = move_batch_to_device(subbatch, local_rank)
                 ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, _, r_queries, r_relatives, h_or_t_sample = subbatch
                 subbatch_preds = model(ht_tensor, r_tensor, r_queries, entity_feat, r_relatives, h_or_t_sample, queries)
-                subbatch_preds = subbatch_preds.reshape(dataloader.batch_size, -1)  # TODO: inferring number of candidates, check that this is right.
+                subbatch_preds = subbatch_preds.reshape(-1, 1001)  # TODO: inferring number of candidates, check that this is right.
                 preds.append(subbatch_preds)
             preds = torch.cat(preds, dim=1)
             t_pred_top10 = preds.topk(10).indices
@@ -328,39 +328,38 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
 def validate(valid_dataset: KGValidationDataset, valid_dataloader: DataLoader, model, global_rank: int,
              local_rank: int, gather_sizes: list, num_batches: int = None, world=None):
     evaluator = WikiKG90MEvaluator()
-    use_full_preds = FLAGS.dataset != "wikikg90m_kddcup2021"
+    use_full_preds = FLAGS.dataset != "wikikg90m_kddcup2021" or (FLAGS.validation_only and FLAGS.validation_batches is None)
     top10_preds, correct_indices, full_preds, filter_mask = run_inference(valid_dataset, valid_dataloader, model,
                                                                           global_rank, local_rank, gather_sizes,
                                                                           num_batches, world,
                                                                           use_full_preds=True)
 
-    import IPython;
-    IPython.embed()
-    input_dict = {'h,r->t': {}}
-    input_dict['h,r->t']['t_correct_index'] = valid_dataset.t_correct_index
-    input_dict['h,r->t']['t_pred'] = full_preds
-    input_dict['h,r->t']['hr'] = valid_dataset.hr
-    input_dict['h,r->t']['t_candidate'] = valid_dataset.t_candidate
-
-    stats_dict = {
-        # 'r_frequency': None,
-
-        't_indegree': valid_dataset.ds.indegrees,
-        't_outdegree': valid_dataset.ds.outdegrees,
-        't_dgree': valid_dataset.ds.degrees,
-
-        'h_indegree': valid_dataset.ds.indegrees,
-        'h_outdegree': valid_dataset.ds.outdegrees,
-        'h_degree': valid_dataset.ds.degrees
-    }
-
-
-    attr_evaluator = AttributedEvaluator()
-    results = attr_evaluator.eval(input_dict, stats_dict)
-
-
     if global_rank == 0:
         if use_full_preds:
+            input_dict = {'h,r->t': {}}
+            input_dict['h,r->t']['t_correct_index'] = valid_dataset.t_correct_index
+            input_dict['h,r->t']['t_pred'] = full_preds
+            input_dict['h,r->t']['hr'] = valid_dataset.hr
+            input_dict['h,r->t']['t_candidate'] = valid_dataset.t_candidate
+
+            stats_dict = {
+                # 'r_frequency': None,
+
+                't_indegree': valid_dataset.ds.indegrees,
+                't_outdegree': valid_dataset.ds.outdegrees,
+                't_degree': valid_dataset.ds.degrees,
+
+                'h_indegree': valid_dataset.ds.indegrees,
+                'h_outdegree': valid_dataset.ds.outdegrees,
+                'h_degree': valid_dataset.ds.degrees,
+                'r_frequency': np.unique(valid_dataset.ds.train_r, return_counts=True)[1]
+            }
+
+            attr_evaluator = AttributedEvaluator()
+            results = attr_evaluator.eval(input_dict, stats_dict)
+            print(results)
+            import pickle
+            pickle.dump(results, open("validation_analysis.pkl","wb"))
             result_dict = compute_eval_stats(full_preds.detach().cpu().numpy(),
                                              correct_indices.detach().cpu().numpy(),
                                              filter_mask=filter_mask.detach().cpu().numpy())
