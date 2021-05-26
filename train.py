@@ -102,7 +102,7 @@ def train(global_rank, local_rank, world):
     if FLAGS.checkpoint is not None:
         model = load_model(os.path.join(CHECKPOINT_DIR, FLAGS.checkpoint), ignore_state_dict=(global_rank != 0))
     else:
-        model = KGCompletionGNN(dataset.relation_feat, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, decoder=FLAGS.decoder)
+        model = KGCompletionGNN(dataset.relation_feat, dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, decoder=FLAGS.decoder)
 
     model.to(local_rank)
 
