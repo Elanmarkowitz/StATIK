@@ -316,6 +316,8 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
                 filter_masks.append(torch.from_numpy(t_filter_mask).to(local_rank))
 
             if True:
+                import IPython;
+                IPython.embed()
                 full_preds.append(preds.detach())
                 input_dict = {}
                 input_dict['h,r->t']['t_correct_index'] = dataset.t_correct_index
@@ -337,8 +339,7 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
 
                 attr_evaluator = AttributedEvaluator()
                 results = attr_evaluator.eval(input_dict, stats_dict)
-                import IPython;
-                IPython.embed()
+                
 
             if isinstance(dataset, KGValidationDataset):
                 t_correct_index = torch.tensor(t_correct_index, device=local_rank)
