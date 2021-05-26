@@ -41,6 +41,8 @@ class AttributedEvaluator:
             t_correct_index = torch.from_numpy(t_correct_index)
 
         # Get rank
+        import IPython;
+        IPython.embed()
         t_ranks = torch.argsort(t_pred, dim=1)[np.arange(len(t_pred)), t_correct_index]
         t_correct = t_candidate[np.arange(len(t_candidate)), t_correct_index]
 

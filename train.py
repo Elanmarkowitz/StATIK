@@ -258,30 +258,6 @@ def inference_only(global_rank, local_rank, world):
         gather_sizes = [FLAGS.valid_batch_size * FLAGS.validation_batches] * num_ranks
 
     if FLAGS.validation_only:
-        full_preds.append(preds.detach())
-        input_dict = {}
-        input_dict['h,r->t']['t_correct_index'] = dataset.t_correct_index
-        input_dict['h,r->t']['t_pred'] = full_preds
-        input_dict['h,r->t']['hr'] = dataset.hr
-        input_dict['h,r->t']['t_candidate'] = dataset.t_candidate
-
-        stats_dict = {
-            # 'r_frequency': None,
-
-            't_indegree': dataset.ds.indegrees,
-            't_outdegree': dataset.ds.outdegrees,
-            't_dgree': dataset.ds.degrees,
-
-            'h_indegree': dataset.ds.indegrees,
-            'h_outdegree': dataset.ds.outdegrees,
-            'h_degree': dataset.ds.degrees
-        }
-
-        attr_evaluator = AttributedEvaluator()
-        results = attr_evaluator.eval(input_dict, stats_dict)
-        import IPython;
-        IPython.embed()
-
         result = validate(eval_dataset, eval_dataloader, ddp_model, global_rank, local_rank, gather_sizes, FLAGS.validation_batches, world)
         if global_rank == 0:
             print('Validation ' + ' '.join([f'{k}={result[k]}' for k in result.keys()]))
@@ -315,30 +291,8 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
             if t_filter_mask is not None:
                 filter_masks.append(torch.from_numpy(t_filter_mask).to(local_rank))
 
-            if True:
-                import IPython;
-                IPython.embed()
+            if use_full_preds:
                 full_preds.append(preds.detach())
-                input_dict = {}
-                input_dict['h,r->t']['t_correct_index'] = dataset.t_correct_index
-                input_dict['h,r->t']['t_pred'] = full_preds
-                input_dict['h,r->t']['hr'] = dataset.hr
-                input_dict['h,r->t']['t_candidate'] = dataset.t_candidate
-
-                stats_dict = {
-                    # 'r_frequency': None,
-
-                    't_indegree': dataset.ds.indegrees,
-                    't_outdegree': dataset.ds.outdegrees,
-                    't_dgree': dataset.ds.degrees,
-
-                    'h_indegree': dataset.ds.indegrees,
-                    'h_outdegree': dataset.ds.outdegrees,
-                    'h_degree': dataset.ds.degrees
-                }
-
-                attr_evaluator = AttributedEvaluator()
-                results = attr_evaluator.eval(input_dict, stats_dict)
                 
 
             if isinstance(dataset, KGValidationDataset):
@@ -378,7 +332,33 @@ def validate(valid_dataset: KGValidationDataset, valid_dataloader: DataLoader, m
     top10_preds, correct_indices, full_preds, filter_mask = run_inference(valid_dataset, valid_dataloader, model,
                                                                           global_rank, local_rank, gather_sizes,
                                                                           num_batches, world,
-                                                                          use_full_preds=use_full_preds)
+                                                                          use_full_preds=True)
+
+    import IPython;
+    IPython.embed()
+    input_dict = {'h,r->t': {}}
+    input_dict['h,r->t']['t_correct_index'] = valid_dataset.t_correct_index
+    input_dict['h,r->t']['t_pred'] = full_preds
+    input_dict['h,r->t']['hr'] = valid_dataset.hr
+    input_dict['h,r->t']['t_candidate'] = valid_dataset.t_candidate
+
+    stats_dict = {
+        # 'r_frequency': None,
+
+        't_indegree': valid_dataset.ds.indegrees,
+        't_outdegree': valid_dataset.ds.outdegrees,
+        't_dgree': valid_dataset.ds.degrees,
+
+        'h_indegree': valid_dataset.ds.indegrees,
+        'h_outdegree': valid_dataset.ds.outdegrees,
+        'h_degree': valid_dataset.ds.degrees
+    }
+
+
+    attr_evaluator = AttributedEvaluator()
+    results = attr_evaluator.eval(input_dict, stats_dict)
+
+
     if global_rank == 0:
         if use_full_preds:
             result_dict = compute_eval_stats(full_preds.detach().cpu().numpy(),
