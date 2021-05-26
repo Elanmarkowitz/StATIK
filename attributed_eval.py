@@ -122,7 +122,7 @@ if __name__ == '__main__':
     # print(dataset.valid_dict['h,r->t']['t_correct_index'].max())
     # print(dataset.valid_dict['h,r->t']['t_correct_index'].min())
 
-    evaluator = AttibutedEvaluator()
+    evaluator = AttributedEvaluator()
 
     valid_dict = dataset.valid_dict
     t_correct_index = valid_dict['h,r->t']['t_correct_index']
@@ -140,7 +140,7 @@ if __name__ == '__main__':
 
     rel_freq = np.random.randint(0, 200, dataset.num_relations)
     stats = {
-        'r': rel_freq
+        'r_freq': rel_freq
     }
     result = evaluator.eval(input_dict, stats)
     # print(result)
