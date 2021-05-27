@@ -243,10 +243,10 @@ class KGCompletionGNN(nn.Module):
         elif self.decoder == "MLP+ConvE":
             if self.training:
                 mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
-                conve_out = -1 * self.conve_decoder(H, r_tensor, ht, queries)
+                conve_out = self.conve_decoder(H, r_tensor, ht, queries)
                 out = (mlp_out.flatten(), conve_out)
             else:
-                out = -1 * self.conve_decoder(H, r_tensor, ht, queries)
+                out = self.conve_decoder(H, r_tensor, ht, queries)
         elif self.decoder == "RelCorr+TransE":
             rel_corr_score = self.relation_correlation_model(ht, r_query, r_tensor, r_relative, h_or_t_sample, queries,
                                                              entity_feat.shape[0])
@@ -307,20 +307,22 @@ class ConvEDecoder(nn.Module):
         self.emb_dim2 = embed_dim // self.emb_dim1
 
         self.conv1 = nn.Conv2d(1, 32, (3, 3), 1, 0, bias=True)
-        self.bn0 = nn.BatchNorm2d(1)
-        self.bn1 = nn.BatchNorm2d(32)
-        self.bn2 = nn.BatchNorm1d(embed_dim)
+        self.bn0 = nn.SyncBatchNorm.convert_sync_batchnorm(nn.BatchNorm2d(1))
+        self.bn1 = nn.SyncBatchNorm.convert_sync_batchnorm(nn.BatchNorm2d(32))
+        self.bn2 = nn.SyncBatchNorm.convert_sync_batchnorm(nn.BatchNorm1d(embed_dim))
         self.fc = nn.Linear(32 * (self.emb_dim1 * 2 - 2) * (self.emb_dim2 - 2), embed_dim)
+
+        self.act = nn.ReLU()
 
     def init(self):
         nn.init.xavier_normal_(self.emb_e.weight.data)
         nn.init.xavier_normal_(self.emb_rel.weight.data)
 
     def forward(self, H, r_tensor, ht, queries):
-        h_embs = H[ht[queries.bool(), 0]].view(-1, 1, self.emb_dim1, self.emb_dim2)
+        h_embs = H[ht[queries.bool(), 0]].reshape(-1, 1, self.emb_dim1, self.emb_dim2)
         t_embs = H[ht[queries.bool(), 1]]
 
-        r_embs = self.emb_rel(r_tensor[queries.bool()]).view(-1, 1, self.emb_dim1, self.emb_dim2)
+        r_embs = self.emb_rel(r_tensor[queries.bool()]).reshape(-1, 1, self.emb_dim1, self.emb_dim2)
 
         stacked_inputs = torch.cat([h_embs, r_embs], 2)
 
@@ -328,9 +330,9 @@ class ConvEDecoder(nn.Module):
         x = self.inp_drop(stacked_inputs)
         x = self.conv1(x)
         x = self.bn1(x)
-        x = F.relu(x)
+        x = self.act(x)
         x = self.feature_map_drop(x)
-        x = x.view(x.shape[0], -1)
+        x = x.reshape(x.shape[0], -1)
         x = self.fc(x)
         x = self.hidden_drop(x)
         x = self.bn2(x)

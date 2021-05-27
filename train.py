@@ -106,7 +106,7 @@ def train(global_rank, local_rank, world):
 
     model.to(local_rank)
 
-    ddp_model = DDP(model, device_ids=[local_rank], process_group=world, find_unused_parameters=True)
+    ddp_model = DDP(model, device_ids=[local_rank], process_group=world, find_unused_parameters=True, broadcast_buffers=False)
     loss_fn = model.get_loss_fn(margin=FLAGS.margin)
     opt = optim.Adam(ddp_model.parameters(), lr=FLAGS.lr)
     scheduler = optim.lr_scheduler.MultiStepLR(opt,
@@ -245,7 +245,7 @@ def inference_only(global_rank, local_rank, world):
     else:
         raise Exception('Must be supplied with model to do inference.')
     model.to(local_rank)
-    ddp_model = DDP(model, device_ids=[local_rank], process_group=world)
+    ddp_model = DDP(model, device_ids=[local_rank], process_group=world, broadcast_buffers=False)
     ddp_model.eval()
 
     if FLAGS.test_only or FLAGS.validation_batches < 0:
@@ -266,6 +266,7 @@ def inference_only(global_rank, local_rank, world):
 
 def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, global_rank: int, local_rank: int,
                   gather_sizes: list, num_batches: int = None, world=None, use_full_preds=False):
+    model.eval()
     top_10s = []
     t_corrects = []
     full_preds = []
