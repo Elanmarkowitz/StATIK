@@ -297,7 +297,7 @@ class KGCompletionGNN(nn.Module):
 
 
 class ConvEDecoder(nn.Module):
-    def __init__(self, num_relations, embed_dim, dropout=0.2, emb_dim1=32, hidden_size=30080):
+    def __init__(self, num_relations, embed_dim, dropout=0.2, emb_dim1=32):
         super(ConvEDecoder, self).__init__()
         self.emb_rel = nn.Embedding(num_relations, embed_dim, padding_idx=0)
         self.inp_drop = nn.Dropout(dropout)
@@ -310,8 +310,7 @@ class ConvEDecoder(nn.Module):
         self.bn0 = nn.BatchNorm2d(1)
         self.bn1 = nn.BatchNorm2d(32)
         self.bn2 = nn.BatchNorm1d(embed_dim)
-        self.fc = nn.Linear(hidden_size, embed_dim)
-        self.final_score = nn.Linear(embed_dim, 1)
+        self.fc = nn.Linear(32 * (self.emb_dim1 * 2 - 2) * (self.emb_dim2 - 2), embed_dim)
 
     def init(self):
         nn.init.xavier_normal_(self.emb_e.weight.data)
@@ -319,11 +318,11 @@ class ConvEDecoder(nn.Module):
 
     def forward(self, H, r_tensor, ht, queries):
         h_embs = H[ht[queries.bool(), 0]].view(-1, 1, self.emb_dim1, self.emb_dim2)
-        t_embs = H[ht[queries.bool(), 1]].view(-1, 1, self.emb_dim1, self.emb_dim2)
+        t_embs = H[ht[queries.bool(), 1]]
 
         r_embs = self.emb_rel(r_tensor[queries.bool()]).view(-1, 1, self.emb_dim1, self.emb_dim2)
 
-        stacked_inputs = torch.cat([h_embs, r_embs, t_embs], 2)
+        stacked_inputs = torch.cat([h_embs, r_embs], 2)
 
         stacked_inputs = self.bn0(stacked_inputs)
         x = self.inp_drop(stacked_inputs)
@@ -335,8 +334,7 @@ class ConvEDecoder(nn.Module):
         x = self.fc(x)
         x = self.hidden_drop(x)
         x = self.bn2(x)
-        x = F.relu(x)
-        preds = self.final_score(x)
+        preds = torch.sum(x * t_embs, dim=1)
 
         return preds
 
