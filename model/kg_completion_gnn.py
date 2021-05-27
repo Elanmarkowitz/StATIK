@@ -205,6 +205,7 @@ class KGCompletionGNN(nn.Module):
         self.decoder = decoder
         self.classify_triple = TripleClassificationLayer(embed_dim)
         self.transE_decoder = TransEDecoder(num_relations, embed_dim)
+        self.conve_decoder = ConvEDecoder(num_relations, embed_dim)
 
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
@@ -239,6 +240,13 @@ class KGCompletionGNN(nn.Module):
                 out = (mlp_out.flatten(), transe_out)
             else:
                 out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
+        elif self.decoder == "MLP+ConvE":
+            if self.training:
+                mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
+                conve_out = -1 * self.conve_decoder(H, r_tensor, ht, queries)
+                out = (mlp_out.flatten(), conve_out)
+            else:
+                out = -1 * self.conve_decoder(H, r_tensor, ht, queries)
         elif self.decoder == "RelCorr+TransE":
             rel_corr_score = self.relation_correlation_model(ht, r_query, r_tensor, r_relative, h_or_t_sample, queries,
                                                              entity_feat.shape[0])
@@ -255,22 +263,21 @@ class KGCompletionGNN(nn.Module):
         return out
 
     def get_loss_fn(self, margin=1.0):
+        self.margin = margin
         if self.decoder == "MLP":
             return nn.BCEWithLogitsLoss()
         elif self.decoder == "TransE":
-            self.margin = margin
             return self.margin_ranking_loss
         elif self.decoder == "MLP+TransE":
-            self.margin = margin
+            return self.combo_loss
+        elif self.decoder == "MLP+ConvE":
             return self.combo_loss
         elif self.decoder == "RelCorr+TransE":
-            self.margin = margin
             return self.margin_ranking_loss
         elif self.decoder == "RelCorr+MLP":
-            self.margin = margin
             return self.margin_ranking_loss
         else:
-            Exception(f"Loss function not known for {self.decoder}")
+            raise Exception(f"Loss function not known for {self.decoder}")
 
     def margin_ranking_loss(self, scores, labels):
         distances = -1 * scores
@@ -287,6 +294,51 @@ class KGCompletionGNN(nn.Module):
         bce_loss = F.binary_cross_entropy_with_logits(mlp_scores, labels)
         transe_loss = self.margin_ranking_loss(transe_scores, labels)
         return transe_loss + 0.4 * bce_loss
+
+
+class ConvEDecoder(nn.Module):
+    def __init__(self, num_relations, embed_dim, dropout=0.2, emb_dim1=32, hidden_size=30080):
+        super(ConvEDecoder, self).__init__()
+        self.emb_rel = nn.Embedding(num_relations, embed_dim, padding_idx=0)
+        self.inp_drop = nn.Dropout(dropout)
+        self.hidden_drop = nn.Dropout(dropout)
+        self.feature_map_drop = nn.Dropout2d(dropout)
+        self.emb_dim1 = emb_dim1
+        self.emb_dim2 = embed_dim // self.emb_dim1
+
+        self.conv1 = nn.Conv2d(1, 32, (3, 3), 1, 0, bias=True)
+        self.bn0 = nn.BatchNorm2d(1)
+        self.bn1 = nn.BatchNorm2d(32)
+        self.bn2 = nn.BatchNorm1d(embed_dim)
+        self.fc = nn.Linear(hidden_size, embed_dim)
+        self.final_score = nn.Linear(embed_dim, 1)
+
+    def init(self):
+        nn.init.xavier_normal_(self.emb_e.weight.data)
+        nn.init.xavier_normal_(self.emb_rel.weight.data)
+
+    def forward(self, H, r_tensor, ht, queries):
+        h_embs = H[ht[queries.bool(), 0]].view(-1, 1, self.emb_dim1, self.emb_dim2)
+        t_embs = H[ht[queries.bool(), 1]].view(-1, 1, self.emb_dim1, self.emb_dim2)
+
+        r_embs = self.emb_rel(r_tensor[queries.bool()]).view(-1, 1, self.emb_dim1, self.emb_dim2)
+
+        stacked_inputs = torch.cat([h_embs, r_embs, t_embs], 2)
+
+        stacked_inputs = self.bn0(stacked_inputs)
+        x = self.inp_drop(stacked_inputs)
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = F.relu(x)
+        x = self.feature_map_drop(x)
+        x = x.view(x.shape[0], -1)
+        x = self.fc(x)
+        x = self.hidden_drop(x)
+        x = self.bn2(x)
+        x = F.relu(x)
+        preds = self.final_score(x)
+
+        return preds
 
 
 class TransEDecoder(nn.Module):
