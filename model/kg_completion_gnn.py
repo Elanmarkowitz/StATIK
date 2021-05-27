@@ -168,7 +168,7 @@ class RelationCorrelationModel(nn.Module):
 
 
 class KGCompletionGNN(nn.Module):
-    def __init__(self, relation_feat, input_dim: int, embed_dim: int, num_layers: int, norm: int=2, decoder: str = "MLP+TransE"):
+    def __init__(self, relation_feat, num_relations: int, input_dim: int, embed_dim: int, num_layers: int, norm: int=2, decoder: str = "MLP+TransE"):
         super(KGCompletionGNN, self).__init__()
 
         local_vals = locals()
@@ -179,13 +179,14 @@ class KGCompletionGNN(nn.Module):
         self.num_layers = num_layers
         self.norm = norm
 
-        self.relation_embedding = nn.Embedding(relation_feat.shape[0], relation_feat.shape[1])
-        self.relation_embedding.weight = nn.Parameter(torch.tensor(relation_feat, dtype=torch.float))
+        self.relation_embedding = nn.Embedding(num_relations, input_dim)
+        if relation_feat is not None:
+            self.relation_embedding.weight = nn.Parameter(torch.tensor(relation_feat, dtype=torch.float))
         self.relation_embedding.weight.requires_grad = False  # Comment to learn through message passing relation embedding table
         self.relative_direction_embedding = nn.Embedding(2, embed_dim)
         self.head_or_tail_edge_embedding = nn.Embedding(2, embed_dim)
 
-        self.edge_input_transform = nn.Linear(relation_feat.shape[1], embed_dim)
+        self.edge_input_transform = nn.Linear(input_dim, embed_dim)
 
         self.entity_input_transform = nn.Linear(input_dim, embed_dim)
 
@@ -199,11 +200,11 @@ class KGCompletionGNN(nn.Module):
             self.message_passing_layers.append(MessagePassingLayer(embed_dim))
             self.edge_update_layers.append(EdgeUpdateLayer(embed_dim))
 
-        self.relation_correlation_model = RelationCorrelationModel(relation_feat.shape[0], embed_dim)
+        self.relation_correlation_model = RelationCorrelationModel(num_relations, embed_dim)
 
         self.decoder = decoder
         self.classify_triple = TripleClassificationLayer(embed_dim)
-        self.transE_decoder = TransEDecoder(relation_feat.shape[0], embed_dim)
+        self.transE_decoder = TransEDecoder(num_relations, embed_dim)
 
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
