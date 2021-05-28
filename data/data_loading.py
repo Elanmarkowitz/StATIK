@@ -286,4 +286,39 @@ class KGTestDataset(KGEvaluationDataset):
             self.t_correct_index = self.task['t_correct_index']
 
 
+class KGRetrainDataset(Dataset):
+    def __init__(self, base_dataset, retrain_h, retrain_r, retrain_t_pos, retrain_t_neg):
+        self.ds = base_dataset
+        self.retrain_h = retrain_h
+        self.retrain_r = retrain_r
+        self.retrain_t_pos = retrain_t_pos
+        self.retrain_t_neg = retrain_t_neg
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        return self.retrain_h[idx], self.retrain_r[idx], self.retrain_t_pos[idx], self.retrain_t_neg[idx]
+
+    def __len__(self):
+        return len(self.retrain_h)
+
+    def get_retrain_collate_fn(self, max_neighbors: int = 10):
+        hrt_collate = self.ds.get_collate_fn(max_neighbors=max_neighbors)
+
+        def collate_fn(batch):
+            _ts = []
+            _hs = []
+            _rs = []
+            for _h, _r, _t_pos, _t_neg in batch:
+                _ts.append(np.array([_t_pos, _t_neg]))
+                _hs.append(_h)
+                _rs.append(_r)
+            outbatch = hrt_collate(list(zip(_hs, _rs, _ts)))
+            ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = outbatch
+            labels[2 * torch.arange(len(labels)//2) + 1] = 0
+            return ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
+        return collate_fn
+
+
 

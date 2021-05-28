@@ -162,6 +162,20 @@ def train(global_rank, local_rank, world):
             save_checkpoint(ddp_model.module, epoch+1, opt, scheduler, os.path.join(CHECKPOINT_DIR, f"{FLAGS.name}_e{epoch}.pkl"))
 
 
+def retrain_criteria(ht, r, queries, preds, labels):
+    positives = labels.bool()
+    negatives = torch.logical_not(positives)
+    incorrects = preds[positives] < preds[negatives]
+    ht_pos = ht[queries.bool()][positives][incorrects]
+    ht_neg = ht[queries.bool()][negatives][incorrects]
+    r_pos = r[queries.bool()][positives][incorrects]
+    h_retrain = ht_pos[:, 0]
+    r_retrain = r_pos
+    t_pos_retrain = ht_pos[:, 1]
+    t_neg_retrain = ht_neg[:, 1]
+    return h_retrain, r_retrain, t_pos_retrain, t_neg_retrain
+
+
 def train_inner(model, train_loader, opt, dataset, device, print_output=True):
     moving_average_loss = torch.tensor(1.0)
     moving_average_acc = torch.tensor(0.5)
