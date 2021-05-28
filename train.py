@@ -17,7 +17,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader, DistributedSampler, Subset
 from tqdm import tqdm
 
-from data.data_loading import load_dataset, KGProcessedDataset, KGValidationDataset, KGEvaluationDataset, KGTestDataset
+from data.data_loading import load_dataset, KGProcessedDataset, KGValidationDataset, KGEvaluationDataset, KGTestDataset, KGRetrainDataset
 from evaluation import compute_eval_stats
 from model.kg_completion_gnn import KGCompletionGNN
 from utils import load_model, load_opt_checkpoint, save_checkpoint, save_model
@@ -121,6 +121,7 @@ def train(global_rank, local_rank, world):
     max_mrr = 0
 
     for epoch in range(start_epoch, FLAGS.epochs):
+        retrain_dataset = KGRetrainDataset(dataset)
         for i, batch in enumerate(tqdm(train_loader)):
             ddp_model.train()
             batch = prepare_batch_for_model(batch, dataset)
@@ -131,6 +132,10 @@ def train(global_rank, local_rank, world):
             loss = loss_fn(scores, labels.float())
 
             moving_average_loss = .999 * moving_average_loss + 0.001 * loss.detach()
+
+            retrain_dataset.check_and_add_to_dataset(ht_tensor.detach().cpu().numpy(), r_tensor.detach().cpu().numpy(),
+                                                     queries.detach().cpu().numpy(), scores.detach().cpu().numpy(),
+                                                     labels.detach().cpu().numpy())
 
             if (i + 1) % FLAGS.print_freq == 0:
                 dist.all_reduce(moving_average_loss, group=world)
@@ -160,20 +165,6 @@ def train(global_rank, local_rank, world):
 
         if global_rank == 0:
             save_checkpoint(ddp_model.module, epoch+1, opt, scheduler, os.path.join(CHECKPOINT_DIR, f"{FLAGS.name}_e{epoch}.pkl"))
-
-
-def retrain_criteria(ht, r, queries, preds, labels):
-    positives = labels.bool()
-    negatives = torch.logical_not(positives)
-    incorrects = preds[positives] < preds[negatives]
-    ht_pos = ht[queries.bool()][positives][incorrects]
-    ht_neg = ht[queries.bool()][negatives][incorrects]
-    r_pos = r[queries.bool()][positives][incorrects]
-    h_retrain = ht_pos[:, 0]
-    r_retrain = r_pos
-    t_pos_retrain = ht_pos[:, 1]
-    t_neg_retrain = ht_neg[:, 1]
-    return h_retrain, r_retrain, t_pos_retrain, t_neg_retrain
 
 
 def train_inner(model, train_loader, opt, dataset, device, print_output=True):

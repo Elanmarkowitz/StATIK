@@ -287,12 +287,36 @@ class KGTestDataset(KGEvaluationDataset):
 
 
 class KGRetrainDataset(Dataset):
-    def __init__(self, base_dataset, retrain_h, retrain_r, retrain_t_pos, retrain_t_neg):
+    def __init__(self, base_dataset, retrain_h=None, retrain_r=None, retrain_t_pos=None, retrain_t_neg=None):
         self.ds = base_dataset
-        self.retrain_h = retrain_h
-        self.retrain_r = retrain_r
-        self.retrain_t_pos = retrain_t_pos
-        self.retrain_t_neg = retrain_t_neg
+        self.retrain_h = retrain_h or np.array([], dtype=np.int32)
+        self.retrain_r = retrain_r or np.array([], dtype=np.int32)
+        self.retrain_t_pos = retrain_t_pos or np.array([], dtype=np.int32)
+        self.retrain_t_neg = retrain_t_neg or np.array([], dtype=np.int32)
+
+    @staticmethod
+    def retrain_criteria(ht, r, queries, preds, labels):
+        positives = labels.bool()
+        negatives = torch.logical_not(positives)
+        incorrects = preds[positives] < preds[negatives]
+        ht_pos = ht[queries.bool()][positives][incorrects]
+        ht_neg = ht[queries.bool()][negatives][incorrects]
+        r_pos = r[queries.bool()][positives][incorrects]
+        h_retrain = ht_pos[:, 0]
+        r_retrain = r_pos
+        t_pos_retrain = ht_pos[:, 1]
+        t_neg_retrain = ht_neg[:, 1]
+        return h_retrain, r_retrain, t_pos_retrain, t_neg_retrain
+
+    def check_and_add_to_dataset(self, ht, r, queries, preds, labels):
+        h_retrain, r_retrain, t_pos_retrain, t_neg_retrain = self.retrain_criteria(ht, r, queries, preds, labels)
+        self.add_to_dataset(h_retrain, r_retrain, t_pos_retrain, t_neg_retrain)
+
+    def add_to_dataset(self, retrain_h, retrain_r, retrain_t_pos, retrain_t_neg):
+        self.retrain_h = np.concatenate([self.retrain_h, retrain_h])
+        self.retrain_r = np.concatenate([self.retrain_r, retrain_r])
+        self.retrain_t_pos = np.concatenate([self.retrain_t_pos, retrain_t_pos])
+        self.retrain_t_neg = np.concatenate([self.retrain_t_neg, retrain_t_neg])
 
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
