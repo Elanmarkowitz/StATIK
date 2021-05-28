@@ -233,6 +233,8 @@ class KGCompletionGNN(nn.Module):
             out = self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
         elif self.decoder == "TransE":
             out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
+        elif self.decoder == "ConvE":
+            out = self.conve_decoder(H, r_tensor, ht, queries)
         elif self.decoder == "MLP+TransE":
             if self.training:
                 mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
@@ -268,6 +270,8 @@ class KGCompletionGNN(nn.Module):
             return nn.BCEWithLogitsLoss()
         elif self.decoder == "TransE":
             return self.margin_ranking_loss
+        elif self.decoder == "ConvE":
+            return self.combo_loss_one_score
         elif self.decoder == "MLP+TransE":
             return self.combo_loss
         elif self.decoder == "MLP+ConvE":
@@ -294,6 +298,11 @@ class KGCompletionGNN(nn.Module):
         bce_loss = F.binary_cross_entropy_with_logits(mlp_scores, labels)
         transe_loss = self.margin_ranking_loss(transe_scores, labels)
         return transe_loss + 0.4 * bce_loss
+
+    def combo_loss_one_score(self, scores, labels):
+        bce_loss = F.binary_cross_entropy_with_logits(scores, labels)
+        margin_loss = self.margin_ranking_loss(scores, labels)
+        return margin_loss + 0.4 * bce_loss
 
 
 class ConvEDecoder(nn.Module):
