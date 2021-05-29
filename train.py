@@ -133,8 +133,9 @@ def train(global_rank, local_rank, world):
 
             moving_average_loss = .999 * moving_average_loss + 0.001 * loss.detach()
 
+            pred_scores = scores[0] if isinstance(scores, tuple) else scores
             retrain_dataset.check_and_add_to_dataset(ht_tensor.detach().cpu().numpy(), r_tensor.detach().cpu().numpy(),
-                                                     queries.detach().cpu().numpy(), scores.detach().cpu().numpy(),
+                                                     queries.detach().cpu().numpy(), pred_scores.detach().cpu().numpy(),
                                                      labels.detach().cpu().numpy())
 
             if (i + 1) % FLAGS.print_freq == 0:
@@ -165,6 +166,49 @@ def train(global_rank, local_rank, world):
 
         if global_rank == 0:
             save_checkpoint(ddp_model.module, epoch+1, opt, scheduler, os.path.join(CHECKPOINT_DIR, f"{FLAGS.name}_e{epoch}.pkl"))
+
+        retrain_sampler = DistributedSampler(retrain_dataset, rank=global_rank, shuffle=True)
+        retrain_loader = DataLoader(retrain_dataset, batch_size=2*FLAGS.batch_size,
+                                        num_workers=FLAGS.num_workers, sampler=retrain_sampler,
+                                        collate_fn=retrain_dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node))
+        for i, batch in enumerate(tqdm(retrain_loader)):
+            ddp_model.train()
+            batch = prepare_batch_for_model(batch, dataset)
+            batch = move_batch_to_device(batch, local_rank)
+            ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
+            scores = ddp_model(ht_tensor, r_tensor, r_queries, entity_feat, r_relatives, h_or_t_sample, queries)
+
+            loss = loss_fn(scores, labels.float())
+
+            moving_average_loss = .999 * moving_average_loss + 0.001 * loss.detach()
+
+            if (i + 1) % FLAGS.print_freq == 0:
+                dist.all_reduce(moving_average_loss, group=world)
+                moving_average_loss /= dist.get_world_size()
+
+                if global_rank == 0:
+                    print(f"Iteration={i}/{len(train_loader)}, "
+                          f"Moving Avg Loss={moving_average_loss.cpu().numpy():.5f}")
+
+            if (i + 1) % FLAGS.validate_every == 0:
+                ddp_model.eval()
+                gather_sizes = [FLAGS.valid_batch_size * FLAGS.validation_batches] * world.size()
+                result = validate(valid_dataset, valid_dataloader, ddp_model, global_rank, local_rank, gather_sizes,
+                                  num_batches=FLAGS.validation_batches,
+                                  world=world)
+                if global_rank == 0:
+                    mrr = result['mrr']
+                    if mrr > max_mrr:
+                        max_mrr = mrr
+                        save_model(ddp_model.module, os.path.join(CHECKPOINT_DIR, f'{FLAGS.name}_best_model.pkl'))
+
+                    print('Current MRR = {}, Best MRR = {}'.format(mrr, max_mrr))
+
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            scheduler.step()
+
 
 
 def train_inner(model, train_loader, opt, dataset, device, print_output=True):

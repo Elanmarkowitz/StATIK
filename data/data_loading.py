@@ -295,13 +295,13 @@ class KGRetrainDataset(Dataset):
         self.retrain_t_neg = retrain_t_neg or np.array([], dtype=np.int32)
 
     @staticmethod
-    def retrain_criteria(ht, r, queries, preds, labels):
-        positives = labels.bool()
-        negatives = torch.logical_not(positives)
+    def retrain_criteria(ht: np.ndarray, r: np.ndarray, queries: np.ndarray, preds: np.ndarray, labels: np.ndarray):
+        positives = labels.astype(np.bool)
+        negatives = np.logical_not(positives)
         incorrects = preds[positives] < preds[negatives]
-        ht_pos = ht[queries.bool()][positives][incorrects]
-        ht_neg = ht[queries.bool()][negatives][incorrects]
-        r_pos = r[queries.bool()][positives][incorrects]
+        ht_pos = ht[queries.astype(np.bool)][positives][incorrects]
+        ht_neg = ht[queries.astype(np.bool)][negatives][incorrects]
+        r_pos = r[queries.astype(np.bool)][positives][incorrects]
         h_retrain = ht_pos[:, 0]
         r_retrain = r_pos
         t_pos_retrain = ht_pos[:, 1]
@@ -327,7 +327,7 @@ class KGRetrainDataset(Dataset):
     def __len__(self):
         return len(self.retrain_h)
 
-    def get_retrain_collate_fn(self, max_neighbors: int = 10):
+    def get_collate_fn(self, max_neighbors: int = 10):
         hrt_collate = self.ds.get_collate_fn(max_neighbors=max_neighbors)
 
         def collate_fn(batch):
@@ -343,6 +343,3 @@ class KGRetrainDataset(Dataset):
             labels[2 * torch.arange(len(labels)//2) + 1] = 0
             return ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
         return collate_fn
-
-
-
