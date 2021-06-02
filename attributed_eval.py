@@ -21,27 +21,28 @@ class AttributedEvaluator:
 
         '''
         assert 'h,r->t' in input_dict
-        assert ('t_pred' in input_dict['h,r->t']) \
-               and ('t_correct_index' in input_dict['h,r->t']) \
+        assert ('t_pred_top10' in input_dict['h,r->t']) \
                and ('hr' in input_dict['h,r->t']) \
                and ('t_candidate' in input_dict['h,r->t'])
 
         hr = input_dict['h,r->t']['hr']
         t_candidate = input_dict['h,r->t']['t_candidate']
-        t_pred = input_dict['h,r->t']['t_pred']
+        t_pred_top10 = input_dict['h,r->t']['t_pred_top10']
         t_correct_index = input_dict['h,r->t']['t_correct_index']
 
         if not isinstance(hr, torch.Tensor):
-            hr = torch.from_numpy(hr)
+            hr = torch.from_numpy(hr).long()
         if not isinstance(t_candidate, torch.Tensor):
-            t_candidate = torch.from_numpy(t_candidate)
-        if not isinstance(t_pred, torch.Tensor):
-            t_pred = torch.from_numpy(t_pred)
+            t_candidate = torch.from_numpy(t_candidate).long()
+        if not isinstance(t_pred_top10, torch.Tensor):
+            t_pred_top10 = torch.from_numpy(t_pred_top10).long()
         if not isinstance(t_correct_index, torch.Tensor):
-            t_correct_index = torch.from_numpy(t_correct_index)
+            t_correct_index = torch.from_numpy(t_correct_index).long()
 
         # Get rank
-        t_ranks = torch.argsort(t_pred, dim=1)[np.arange(len(t_pred)), t_correct_index]
+        nonzero_idx = torch.eq(t_pred_top10, t_correct_index.reshape(-1,1)).nonzero()
+        t_ranks = torch.tensor([float('inf')]).repeat(t_pred_top10.shape[0])
+        t_ranks[nonzero_idx[:,0]] = nonzero_idx[:,1].float()
         t_correct = t_candidate[np.arange(len(t_candidate)), t_correct_index]
 
         results = {}
@@ -87,6 +88,9 @@ class AttributedEvaluator:
     def _aggregate_by_stats(self, hr, t, ranks, stats, group_by_column):
         _data = torch.cat((hr, t[:, np.newaxis], ranks[:, np.newaxis]), dim=1).numpy()
         df = pd.DataFrame(data=_data, columns=['h', 'r', 't', 'ranks'])
+        df['h'] = df['h'].astype('int')
+        df['r'] = df['r'].astype('int')
+        df['t'] = df['t'].astype('int')
         df['stats'] = stats[df[group_by_column].values]
         return df.groupby('stats').agg(
             mrr=pd.NamedAgg(column='ranks', aggfunc=self._calculate_mrr),
@@ -104,6 +108,14 @@ class AttributedEvaluator:
 
     def save_ranks(self, ranks):
         pass
+
+
+def convert_stats_to_percentiles(stats: np.ndarray, thresholds=None):
+    percentile_cutoffs = np.arange(10, 100, 10)
+    if thresholds is None:
+        thresholds = np.percentile(stats, percentile_cutoffs)
+    binned_stats = np.digitize(stats, thresholds)
+    return binned_stats, thresholds
 
 
 if __name__ == '__main__':

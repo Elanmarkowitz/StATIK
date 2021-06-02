@@ -17,7 +17,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader, DistributedSampler, Subset
 from tqdm import tqdm
 
-from attributed_eval import AttributedEvaluator
+from attributed_eval import AttributedEvaluator, convert_stats_to_percentiles
 from data.data_loading import load_dataset, KGProcessedDataset, KGValidationDataset, KGEvaluationDataset, KGTestDataset
 from evaluation import compute_eval_stats
 from model.kg_completion_gnn import KGCompletionGNN
@@ -52,6 +52,7 @@ flags.DEFINE_bool('test_only', False, 'Whether or not to do a complete inference
 flags.DEFINE_string('model_path_depr', None, 'DEPRECATED: Path where the model is saved')
 flags.DEFINE_string('model_path', None, 'Path where the model is saved (inference only)')
 flags.DEFINE_string("test_save_dir", "test_submissions", "Directory to save test results file in.")
+flags.DEFINE_bool("validation_attribution", True, "Whether to perform validation attribution on full validation runs")
 
 CHECKPOINT_DIR = "checkpoints"
 
@@ -313,7 +314,7 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
         aggregated_correct_indices = gather_results(t_correct_index, global_rank, local_rank, gather_sizes, world)
 
     aggregated_full_preds = None
-    if full_preds:
+    if use_full_preds:
         full_preds = torch.cat(full_preds, dim=0)
         aggregated_full_preds = gather_results(full_preds, global_rank, local_rank, gather_sizes, world)
 
@@ -328,38 +329,49 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
 def validate(valid_dataset: KGValidationDataset, valid_dataloader: DataLoader, model, global_rank: int,
              local_rank: int, gather_sizes: list, num_batches: int = None, world=None):
     evaluator = WikiKG90MEvaluator()
-    use_full_preds = FLAGS.dataset != "wikikg90m_kddcup2021" or (FLAGS.validation_only and FLAGS.validation_batches is None)
+    use_full_preds = FLAGS.dataset != "wikikg90m_kddcup2021"
     top10_preds, correct_indices, full_preds, filter_mask = run_inference(valid_dataset, valid_dataloader, model,
                                                                           global_rank, local_rank, gather_sizes,
                                                                           num_batches, world,
-                                                                          use_full_preds=True)
+                                                                          use_full_preds=use_full_preds)
 
     if global_rank == 0:
-        if use_full_preds:
-            input_dict = {'h,r->t': {}}
-            input_dict['h,r->t']['t_correct_index'] = valid_dataset.t_correct_index
-            input_dict['h,r->t']['t_pred'] = full_preds
-            input_dict['h,r->t']['hr'] = valid_dataset.hr
-            input_dict['h,r->t']['t_candidate'] = valid_dataset.t_candidate
+        if FLAGS.validation_attribution and FLAGS.validation_only:
+            input_dict = {'h,r->t': {'t_pred_top10': top10_preds.cpu().numpy(),
+                                     't_correct_index': correct_indices.cpu().numpy(),
+                                     'hr': valid_dataset.hr,
+                                     't_candidate': valid_dataset.t_candidate}}
 
-            stats_dict = {
-                # 'r_frequency': None,
-
-                't_indegree': valid_dataset.ds.indegrees,
-                't_outdegree': valid_dataset.ds.outdegrees,
-                't_degree': valid_dataset.ds.degrees,
-
-                'h_indegree': valid_dataset.ds.indegrees,
-                'h_outdegree': valid_dataset.ds.outdegrees,
-                'h_degree': valid_dataset.ds.degrees,
-                'r_frequency': np.unique(valid_dataset.ds.train_r, return_counts=True)[1]
-            }
+            stats_dict = {}
+            stats_dict_thresholds = {}
+            indegrees, indegrees_thresholds = convert_stats_to_percentiles(valid_dataset.ds.indegrees)
+            stats_dict['t_indegree'] = indegrees
+            stats_dict_thresholds['t_indegree'] = indegrees_thresholds
+            t_outdegree, t_outdegree_thresholds = convert_stats_to_percentiles(valid_dataset.ds.outdegrees)
+            stats_dict['t_outdegree'] = t_outdegree
+            stats_dict_thresholds['t_outdegree'] = t_outdegree_thresholds
+            t_degree, t_degree_thresholds = convert_stats_to_percentiles(valid_dataset.ds.degrees)
+            stats_dict['t_degree'] = t_degree
+            stats_dict_thresholds['t_degree'] = t_degree_thresholds
+            h_indegree, h_indegree_thresholds = convert_stats_to_percentiles(valid_dataset.ds.indegrees)
+            stats_dict['h_indegree'] = h_indegree
+            stats_dict_thresholds['h_indegree'] = h_indegree_thresholds
+            h_outdegree, h_outdegree_thresholds = convert_stats_to_percentiles(valid_dataset.ds.outdegrees)
+            stats_dict['h_outdegree'] = h_outdegree
+            stats_dict_thresholds['h_outdegree'] = h_outdegree_thresholds,
+            h_degree, h_degree_thresholds = convert_stats_to_percentiles(valid_dataset.ds.degrees)
+            stats_dict['h_degree'] = h_degree
+            stats_dict_thresholds['h_degree'] = h_degree_thresholds
+            r_frequency, r_frequency_thresholds = convert_stats_to_percentiles(np.unique(valid_dataset.ds.train_r, return_counts=True)[1])
+            stats_dict['r_frequency'] = r_frequency
+            stats_dict_thresholds['r_frequency'] = r_frequency_thresholds
 
             attr_evaluator = AttributedEvaluator()
             results = attr_evaluator.eval(input_dict, stats_dict)
-            print(results)
-            import pickle
-            pickle.dump(results, open("validation_analysis.pkl","wb"))
+            pickle.dump(results, open("validation_analysis.pkl", "wb"))
+            pickle.dump(stats_dict_thresholds, open("analysis_thresholds.pkl", "wb"))
+
+        if use_full_preds:
             result_dict = compute_eval_stats(full_preds.detach().cpu().numpy(),
                                              correct_indices.detach().cpu().numpy(),
                                              filter_mask=filter_mask.detach().cpu().numpy())
@@ -402,6 +414,8 @@ def gather_results(data: torch.Tensor, global_rank, local_rank, gather_sizes, wo
 
     for size in gather_sizes:
         gather_list.append(torch.empty(size, *data.shape[1:], dtype=data.dtype, device=local_rank))
+
+    dist.barrier()
 
     if global_rank == 0:
         gather_list[0] = data
