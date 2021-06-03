@@ -276,8 +276,15 @@ class KGCompletionGNN(nn.Module):
         distances = -1 * scores
         positives = labels.nonzero(as_tuple=False).flatten()
         negatives = (labels == 0).nonzero(as_tuple=False).flatten()
+
         pos_distances = distances[positives]
         neg_distances = distances[negatives]
+
+        negs_per_pos = neg_distances.shape[0] // pos_distances.shape[0]
+
+        neg_distances = neg_distances.reshape(-1, negs_per_pos)
+        pos_distances = pos_distances.reshape(-1, 1).expand(-1, negs_per_pos)
+
         target = torch.tensor([-1], dtype=torch.long, device=scores.device)
         return F.margin_ranking_loss(pos_distances, neg_distances, target, margin=self.margin)
 
