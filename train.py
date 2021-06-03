@@ -35,6 +35,7 @@ flags.DEFINE_string("checkpoint", None, "Resume training from checkpoint file in
 flags.DEFINE_string("name", "run01", "A name to use for saving the run.")
 
 flags.DEFINE_integer("batch_size", 100, "Batch size. Number of triples.")
+flags.DEFINE_integer("neg_samples", 1, "Number of neg samples per positive tail during training.")
 flags.DEFINE_integer("samples_per_node", 10, "Number of neighbors to sample for each entity in a query triple.")
 flags.DEFINE_integer("embed_dim", 256, "Number of dimensions for hidden states.")
 flags.DEFINE_integer("layers", 2, "Number of message passing and edge update layers for model.")
@@ -92,7 +93,7 @@ def train(global_rank, local_rank, world):
     train_sampler = DistributedSampler(dataset, rank=global_rank, shuffle=True)
     train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size,
                               num_workers=FLAGS.num_workers, sampler=train_sampler,
-                              collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, sample_negs=1))
+                              collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, sample_negs=FLAGS.neg_samples))
 
     valid_dataset = KGValidationDataset(dataset)
     valid_sampler = DistributedSampler(valid_dataset, rank=global_rank, shuffle=False)
