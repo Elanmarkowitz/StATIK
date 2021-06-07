@@ -167,6 +167,26 @@ class RelationCorrelationModel(nn.Module):
         return self.final_score(final_query_embedding)
 
 
+class DistMultDecoder(nn.Module):
+    def __init__(self, num_relations, embed_dim):
+        super(DistMultDecoder, self).__init__()
+        self.relation_vector = nn.Embedding(num_relations, embed_dim)
+        self.relation_vector.weight.data.uniform_(-6 / math.sqrt(embed_dim), 6 / math.sqrt(embed_dim))
+
+    def forward(self, H, r_tensor, ht, queries):
+        query_idxs = queries.nonzero().flatten()
+        ht_q = ht[query_idxs]
+        r_q = r_tensor[query_idxs]
+
+        head_embeds = H[ht_q[:, 0]]
+        relation_embeds = self.relation_vector(r_q)
+        tail_embeds = H[ht_q[:, 1]]
+
+        scores = torch.sum(head_embeds * relation_embeds * tail_embeds, dim=1)
+
+        return scores
+
+
 class KGCompletionGNN(nn.Module):
     def __init__(self, relation_feat, num_relations: int, input_dim: int, embed_dim: int, num_layers: int, norm: int=2, decoder: str = "MLP+TransE"):
         super(KGCompletionGNN, self).__init__()
@@ -205,6 +225,7 @@ class KGCompletionGNN(nn.Module):
         self.decoder = decoder
         self.classify_triple = TripleClassificationLayer(embed_dim)
         self.transE_decoder = TransEDecoder(num_relations, embed_dim)
+        self.distmult_decoder = DistMultDecoder(num_relations, embed_dim)
 
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
@@ -248,6 +269,13 @@ class KGCompletionGNN(nn.Module):
             rel_corr_score = self.relation_correlation_model(ht, r_query, r_tensor, r_relative, h_or_t_sample, queries,
                                                              entity_feat.shape[0])
             out = rel_corr_score.flatten() + self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
+        elif self.decoder == "DistMult+MLP":
+            if self.training:
+                mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
+                transe_out = self.distmult_decoder(H, r_tensor, ht, queries)
+                out = (mlp_out.flatten(), transe_out)
+            else:
+                out = self.distmult_decoder(H, r_tensor, ht, queries)
         else:
             out = None
             Exception('Decoder not valid.')
@@ -269,6 +297,9 @@ class KGCompletionGNN(nn.Module):
         elif self.decoder == "RelCorr+MLP":
             self.margin = margin
             return self.margin_ranking_loss
+        elif self.decoder == "DistMult+MLP":
+            self.margin = margin
+            return self.combo_loss
         else:
             Exception(f"Loss function not known for {self.decoder}")
 
