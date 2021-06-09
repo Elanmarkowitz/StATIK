@@ -29,7 +29,7 @@ flags.DEFINE_string("root_data_dir", "/nas/home/elanmark/data", "Root data dir f
 
 flags.DEFINE_bool("distributed", True, "Indicate whether to use distributed training.")
 flags.DEFINE_integer("num_workers", 0, "Number of workers for the dataloader.")
-flags.DEFINE_integer("local_rank", 0, "How frequently to print learning statistics in number of iterations") # TODO: Change description here
+flags.DEFINE_integer("local_rank", 0, "How frequently to print learning statistics in number of iterations")  # TODO: Change description here
 flags.DEFINE_integer("print_freq", 1024, "How frequently to print learning statistics in number of iterations")
 flags.DEFINE_string("device", "cuda", "Device to use (cuda/cpu).")
 flags.DEFINE_string("checkpoint", None, "Resume training from checkpoint file in checkpoints directory.")
@@ -70,7 +70,7 @@ def prepare_batch_for_model(batch, dataset: KGProcessedDataset, save_batch=False
 
 
 def move_batch_to_device(batch, device):
-    ht_tensor, r_tensor, entity_set, entity_feat,  indeg_feat, outdeg_feat,queries, labels, r_queries, r_relatives, h_or_t_sample = batch
+    ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
     ht_tensor = ht_tensor.to(device)
     r_tensor = r_tensor.to(device)
     entity_feat = entity_feat.to(device)
@@ -162,7 +162,7 @@ def train(global_rank, local_rank, world):
             scheduler.step()
 
         if global_rank == 0:
-            save_checkpoint(ddp_model.module, epoch+1, opt, scheduler, os.path.join(CHECKPOINT_DIR, f"{FLAGS.name}_e{epoch}.pkl"))
+            save_checkpoint(ddp_model.module, epoch + 1, opt, scheduler, os.path.join(CHECKPOINT_DIR, f"{FLAGS.name}_e{epoch}.pkl"))
 
 
 def train_inner(model, train_loader, opt, dataset, device, print_output=True):
@@ -236,7 +236,7 @@ def inference_only(global_rank, local_rank, world):
 
     subset = Subset(eval_dataset, rank_idxs)
     eval_dataloader = DataLoader(subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
-                                   collate_fn=eval_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
+                                 collate_fn=eval_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
 
     assert FLAGS.model_path_depr is not None or FLAGS.model_path is not None, 'Must be supplied with model to do inference.'
     if FLAGS.model_path_depr is not None:
@@ -295,7 +295,6 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
 
             if use_full_preds:
                 full_preds.append(preds.detach())
-                
 
             if isinstance(dataset, KGValidationDataset):
                 t_correct_index = torch.tensor(t_correct_index, device=local_rank)
