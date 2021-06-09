@@ -53,7 +53,7 @@ flags.DEFINE_bool('test_only', False, 'Whether or not to do a complete inference
 flags.DEFINE_string('model_path_depr', None, 'DEPRECATED: Path where the model is saved')
 flags.DEFINE_string('model_path', None, 'Path where the model is saved (inference only)')
 flags.DEFINE_string("test_save_dir", "test_submissions", "Directory to save test results file in.")
-flags.DEFINE_bool("validation_attribution", True, "Whether to perform validation attribution on full validation runs")
+flags.DEFINE_bool("validation_attribution", False, "Whether to perform validation attribution on full validation runs")
 
 CHECKPOINT_DIR = "checkpoints"
 
