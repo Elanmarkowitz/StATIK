@@ -283,7 +283,7 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
                 subbatch = move_batch_to_device(subbatch, local_rank)
                 ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, _, r_queries, r_relatives, h_or_t_sample = subbatch
                 subbatch_preds = model(ht_tensor, r_tensor, r_queries, entity_feat, r_relatives, h_or_t_sample, queries)
-                subbatch_preds = subbatch_preds.reshape(-1, dataset.t_candidate.shape[1])  # TODO: inferring number of candidates, check that this is right.
+                subbatch_preds = subbatch_preds.reshape(t_correct_index.shape[0], -1)  # TODO: inferring number of candidates, check that this is right.
                 preds.append(subbatch_preds)
             preds = torch.cat(preds, dim=1)
             t_pred_top10 = preds.topk(10).indices
