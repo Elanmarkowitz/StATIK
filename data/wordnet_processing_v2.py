@@ -14,9 +14,18 @@ import urllib.request
 
 ROOT_DIR = os.environ["DATA_DIR"] if "DATA_DIR" in os.environ else "/data/mehrnoom"
 
+DATASET_INFO = dt_info = {
+        'dataset': 'WN18RR',
+        'url': 'https://surfdrive.surf.nl/files/index.php/s/N1c8VRH0I6jTJuN/download',
+        'train': 'ind-train.tsv',
+        'test': 'ind-test.tsv',
+        'dev': 'ind-dev.tsv',
+        'ent_desc': 'entity2text.txt',
+        'rel_desc': 'relation2text.txt'
+    }
 
 class ProcessWordNet(object):
-    def __init__(self, dataset_info):
+    def __init__(self, root_data_dir=None, dataset_info=None):
         # print('hello')
         # try:
         self.num_relations = None
@@ -31,8 +40,11 @@ class ProcessWordNet(object):
         self.entity2id = None
         self.relation2id = None
 
-        self.dataset_info = dataset_info
-        self.data_dir = os.path.join(ROOT_DIR, self.dataset_info['dataset'])
+        self.dataset_info = DATASET_INFO if dataset_info is None else dataset_info
+        if root_data_dir is None:
+            self.data_dir = os.path.join(ROOT_DIR, self.dataset_info['dataset'])
+        else:
+            self.data_dir = os.path.join(root_data_dir, 'WN18RR')
 
         if not os.path.isdir(self.data_dir):
             print('Downloading data ....')
@@ -126,8 +138,8 @@ class ProcessWordNet(object):
         self.num_relations = len(self.relation2id.keys())
 
         self.train_hrt = self.load_from_npy(self.dataset_info['train'])
-        self.valid_hrt = self.load_from_npy(self.dataset_info['train'])
-        self.test_hrt = self.load_from_npy(self.dataset_info['train'])
+        self.valid_hrt = self.load_from_npy(self.dataset_info['dev'])
+        self.test_hrt = self.load_from_npy(self.dataset_info['test'])
 
         self.entity_feat = self.load_from_npy('entity_features.npy')
         self.relation_feat = self.load_from_npy('relation_features.npy')
