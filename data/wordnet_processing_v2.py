@@ -14,7 +14,7 @@ import urllib.request
 
 ROOT_DIR = os.environ["DATA_DIR"] if "DATA_DIR" in os.environ else "/data/mehrnoom"
 
-DATASET_INFO = dt_info = {
+DATASET_INFO = {
         'dataset': 'WN18RR',
         'url': 'https://surfdrive.surf.nl/files/index.php/s/N1c8VRH0I6jTJuN/download',
         'train': 'ind-train.tsv',
@@ -44,7 +44,7 @@ class ProcessWordNet(object):
         if root_data_dir is None:
             self.data_dir = os.path.join(ROOT_DIR, self.dataset_info['dataset'])
         else:
-            self.data_dir = os.path.join(root_data_dir, 'WN18RR')
+            self.data_dir = os.path.join(root_data_dir, self.dataset_info['dataset'])
 
         if not os.path.isdir(self.data_dir):
             print('Downloading data ....')
