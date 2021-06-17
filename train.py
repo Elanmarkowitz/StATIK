@@ -101,10 +101,18 @@ def train(global_rank, local_rank, world):
                                                                 sample_negs=FLAGS.neg_samples,
                                                                 neg_heads=FLAGS.predict_heads))
 
-    valid_dataset = KGValidationDataset(dataset, head_prediction=FLAGS.predict_heads)
+    valid_dataset = KGValidationDataset(dataset)
     valid_sampler = DistributedSampler(valid_dataset, rank=global_rank, shuffle=False)
     valid_dataloader = DataLoader(valid_dataset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers, sampler=valid_sampler,
                                   drop_last=True, collate_fn=valid_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
+
+    if FLAGS.predict_heads:
+        valid_dataset_head = KGValidationDataset(dataset, head_prediction=True)
+        valid_sampler_head = DistributedSampler(valid_dataset_head, rank=global_rank, shuffle=False)
+        valid_dataloader_head = DataLoader(valid_dataset_head, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
+                                           sampler=valid_sampler,
+                                           drop_last=True, collate_fn=valid_dataset_head.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
+
 
     if FLAGS.checkpoint is not None:
         model = load_model(os.path.join(CHECKPOINT_DIR, FLAGS.checkpoint), ignore_state_dict=(global_rank != 0))
@@ -152,11 +160,17 @@ def train(global_rank, local_rank, world):
                 gather_sizes = [FLAGS.valid_batch_size * FLAGS.validation_batches] * world.size()
                 result = validate(valid_dataset, valid_dataloader, ddp_model, global_rank, local_rank, gather_sizes, num_batches=FLAGS.validation_batches,
                                   world=world)
+                if FLAGS.predict_heads:
+                    result2 = validate(valid_dataset_head, valid_dataloader_head, ddp_model, global_rank, local_rank,
+                                       gather_sizes, num_batches=FLAGS.validation_batches, world=world)
+                    if global_rank == 0:
+                        result['mrr'] = 0.5*result['mrr'] + 0.5*result2['mrr']
                 if global_rank == 0:
                     mrr = result['mrr']
                     if mrr > max_mrr:
                         max_mrr = mrr
                         save_model(ddp_model.module, os.path.join(CHECKPOINT_DIR, f'{FLAGS.name}_best_model.pkl'))
+
 
                     print('Current MRR = {}, Best MRR = {}'.format(mrr, max_mrr))
 
