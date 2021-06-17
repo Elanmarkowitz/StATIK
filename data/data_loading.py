@@ -141,7 +141,7 @@ class KGProcessedDataset(Dataset):
 
         return
 
-    def get_collate_fn(self, max_neighbors: int = 10, sample_negs: int = 0):
+    def get_collate_fn(self, max_neighbors: int = 10, sample_negs: int = 0, neg_heads=False):
         def wikikg_collate_fn(batch):
             # query edge marked as query
             # 1-hop connected entities included
@@ -157,14 +157,17 @@ class KGProcessedDataset(Dataset):
             h_or_t_sample = array("i")
             cumulative_entities = 0
 
+            neg_candidates = np.empty((len(batch), 0), dtype=np.int64)
+            neg_h_candiates = np.empty((len(batch), 0), dtype=np.int64)
             if sample_negs:
                 neg_candidates = np.random.randint(0, self.num_entities, size=(len(batch), sample_negs))
-            else:
-                neg_candidates = np.empty((len(batch), 0), dtype=np.int64)
+                if neg_heads:
+                    neg_h_candiates = np.random.randint(0, self.num_entities, size=(len(batch), sample_negs))
 
-            for (_h, _r, _ts), _neg_ts in zip(batch, neg_candidates):
+            for (_h, _r, _ts), _neg_ts, _neg_hs in zip(batch, neg_candidates, neg_h_candiates):
                 t_candidates = np.concatenate([_ts, _neg_ts])
                 sample_labels = np.concatenate([np.ones_like(_ts), np.zeros_like(_neg_ts)])
+                true_t = _ts[0]
 
                 rels_h, tails_h = self.sample_neighbors(_h, max_neighbors)
 
@@ -180,6 +183,22 @@ class KGProcessedDataset(Dataset):
                     self.add_component(edge_heads, edge_relations, edge_tails, is_query, labels, cumulative_entities,
                                        batch_id_to_node_id, r_queries, r_relatives, h_or_t_sample, component)
                     cumulative_entities += c_size
+
+                if neg_heads:
+                    rels_t, tails_t = self.sample_neighbors(true_t, max_neighbors)
+                    for _h, _label in zip(_neg_hs, np.zeros_like(_neg_hs)):
+                        rels_h, tails_h = self.sample_neighbors(_h, max_neighbors)
+
+                        rels_t_h, tails_t_h = self.ignore_query(rels_t, tails_t, _r + self.num_relations, _h)
+                        rels_h, tails_h = self.ignore_query(rels_h, tails_h, _r, true_t)
+
+                        component, c_size = self.create_component(_h, rels_h, tails_h, true_t, rels_t_h, tails_t_h, _r,
+                                                                  _label)
+
+                        self.add_component(edge_heads, edge_relations, edge_tails, is_query, labels,
+                                           cumulative_entities,
+                                           batch_id_to_node_id, r_queries, r_relatives, h_or_t_sample, component)
+                        cumulative_entities += c_size
 
             ht_tensor = torch.from_numpy(np.stack([edge_heads, edge_tails]).transpose()).long()
             r_tensor = torch.from_numpy(np.array(edge_relations)).long()
@@ -208,16 +227,25 @@ def load_dataset(root_data_dir: str, dataset_name: str):
 
 class KGEvaluationDataset(Dataset):
 
-    def __init__(self, full_dataset: KGProcessedDataset, task, num_candidates_per_itr=None):
+    def __init__(self, full_dataset: KGProcessedDataset, task, num_candidates_per_itr=None, head_prediction=False):
         self.ds = full_dataset
         self.task = task
-        self.hr = task['hr']
-        self.t_candidate = task['t_candidate']
-        self.t_candidate_filter_mask = None
-        if 't_candidate_filter_mask' in task:
-            self.t_candidate_filter_mask = task['t_candidate_filter_mask']
-        self.t_correct_index = None
+        if head_prediction:  # use tails as "head" and head candidates as "t candidates". Reverse after collate
+            self.hr = task['tr']
+            self.t_candidate = task['h_candidate']
+            self.t_candidate_filter_mask = None
+            if 'h_candidate_filter_mask' in task:
+                self.t_candidate_filter_mask = task['h_candidate_filter_mask']
+            self.t_correct_index = None
+        else:
+            self.hr = task['hr']
+            self.t_candidate = task['t_candidate']
+            self.t_candidate_filter_mask = None
+            if 't_candidate_filter_mask' in task:
+                self.t_candidate_filter_mask = task['t_candidate_filter_mask']
+            self.t_correct_index = None
         self.num_candidates_per_itr = num_candidates_per_itr
+        self.head_prediction = head_prediction
 
     def __len__(self):
         return len(self.hr)
@@ -259,6 +287,11 @@ class KGEvaluationDataset(Dataset):
                 for i in range(0, batch_t_candidates[0].shape[0], self.num_candidates_per_itr):
                     subbatch_t_candidates = [batch_t_candidates[e][i:i+self.num_candidates_per_itr] for e in range(len(batch_t_candidates))]
                     subbatch = hrt_collate(list(zip(batch_h, batch_r, subbatch_t_candidates)))
+                    if self.head_prediction:  # reverse for when doing head prediction
+                        ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = subbatch
+                        ht_tensor = ht_tensor[:, [1, 0]]
+                        h_or_t_sample = torch.where(h_or_t_sample == 0, 1, 0)
+                        subbatch = ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
                     out_batches.append(subbatch)
             else:
                 out_batches.append(hrt_collate(list(zip(batch_h, batch_r, batch_t_candidates))))
@@ -272,18 +305,26 @@ class KGEvaluationDataset(Dataset):
 
 
 class KGValidationDataset(KGEvaluationDataset):
-    def __init__(self, full_dataset: KGProcessedDataset, num_candidates_per_itr=1001):
+    def __init__(self, full_dataset: KGProcessedDataset, num_candidates_per_itr=1001, head_prediction=False):
         super(KGValidationDataset, self).__init__(full_dataset, full_dataset.valid_dict['h,r->t'],
-                                                  num_candidates_per_itr=num_candidates_per_itr)
-        self.t_correct_index = self.task['t_correct_index']
+                                                  num_candidates_per_itr=num_candidates_per_itr,
+                                                  head_prediction=head_prediction)
+        if head_prediction:
+            self.t_correct_index = self.task['h_correct_index']
+        else:
+            self.t_correct_index = self.task['t_correct_index']
 
 
 class KGTestDataset(KGEvaluationDataset):
-    def __init__(self, full_dataset: KGProcessedDataset, num_candidates_per_itr=1001):
+    def __init__(self, full_dataset: KGProcessedDataset, num_candidates_per_itr=1001, head_prediction=False):
         super(KGTestDataset, self).__init__(full_dataset, full_dataset.test_dict['h,r->t'],
-                                            num_candidates_per_itr=num_candidates_per_itr)
+                                            num_candidates_per_itr=num_candidates_per_itr,
+                                            head_prediction=head_prediction)
         if 't_correct_index' in self.task:
-            self.t_correct_index = self.task['t_correct_index']
+            if head_prediction:
+                self.t_correct_index = self.task['h_correct_index']
+            else:
+                self.t_correct_index = self.task['t_correct_index']
 
 
 

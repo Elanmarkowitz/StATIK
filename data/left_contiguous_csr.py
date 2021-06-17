@@ -20,6 +20,14 @@ class LeftContiguousCSR:
         npzfile = np.load(filepath)
         return LeftContiguousCSR(npzfile['indptr'], npzfile['degrees'], npzfile['data'])
 
+    @staticmethod
+    def join(first, second):
+        indptr = np.concatenate([first.indptr, second.indptr + len(first.data)])
+        degrees = np.concatenate([first.degrees, second.degrees])
+        data = np.concatenate([first.data, second.data])
+        return LeftContiguousCSR(indptr, degrees, data)
+
+
 # uniform batch sampling can be done as follows
 
 # self.data[
