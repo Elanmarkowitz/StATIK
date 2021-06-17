@@ -166,7 +166,11 @@ def process_data(root_data_dir: str, dataset_name: str) -> None:
             'hr': dataset.valid_hrt[:, [0, 1]],
             't_candidate': valid_cand.reshape((num_valid, dataset.num_entities)),  # this needs to be repeated for each validation triple shape: (num valid, num_entities)
             't_candidate_filter_mask': filtered_cand.reshape((num_valid, dataset.num_entities)),
-            't_correct_index': dataset.valid_hrt[:, 2]
+            't_correct_index': dataset.valid_hrt[:, 2],
+            'tr': None, # TODO
+            'h_candidate': None,
+            'h_candidate_filter_mask': None,
+            'h_correct_index': None
         }}
         pickle.dump(valid_dict, open(os.path.join(save_dir, 'valid_dict.pkl'), 'wb'))
     if hasattr(dataset, 'test_hrt'):
@@ -177,7 +181,11 @@ def process_data(root_data_dir: str, dataset_name: str) -> None:
             'hr': dataset.test_hrt[:, [0, 1]],
             't_candidate': test_cand.reshape((num_test, dataset.num_entities)),
             't_candidate_filter_mask': filtered_cand.reshape((num_test, dataset.num_entities)),
-            't_correct_index': dataset.test_hrt[:, 2]
+            't_correct_index': dataset.test_hrt[:, 2],
+            'tr': None,  # TODO
+            'h_candidate': None,
+            'h_candidate_filter_mask': None,
+            'h_correct_index': None
         }}
         pickle.dump(test_dict, open(os.path.join(save_dir, 'test_dict.pkl'), 'wb'))
 

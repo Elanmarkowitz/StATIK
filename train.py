@@ -14,7 +14,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from ogb.lsc import WikiKG90MEvaluator
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import Dataset, DataLoader, DistributedSampler, Subset
+from torch.utils.data import Dataset, DataLoader, DistributedSampler, Subset, ConcatDataset
 from tqdm import tqdm
 
 from attributed_eval import AttributedEvaluator, convert_stats_to_percentiles
@@ -54,6 +54,8 @@ flags.DEFINE_string('model_path_depr', None, 'DEPRECATED: Path where the model i
 flags.DEFINE_string('model_path', None, 'Path where the model is saved (inference only)')
 flags.DEFINE_string("test_save_dir", "test_submissions", "Directory to save test results file in.")
 flags.DEFINE_bool("validation_attribution", False, "Whether to perform validation attribution on full validation runs")
+
+flags.DEFINE_bool("predict_heads", True, "Whether to predict heads and sample heads at training.")
 
 CHECKPOINT_DIR = "checkpoints"
 
@@ -95,9 +97,11 @@ def train(global_rank, local_rank, world):
     train_sampler = DistributedSampler(dataset, rank=global_rank, shuffle=True)
     train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size,
                               num_workers=FLAGS.num_workers, sampler=train_sampler,
-                              collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, sample_negs=FLAGS.neg_samples))
+                              collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node,
+                                                                sample_negs=FLAGS.neg_samples,
+                                                                neg_heads=FLAGS.predict_heads))
 
-    valid_dataset = KGValidationDataset(dataset)
+    valid_dataset = KGValidationDataset(dataset, head_prediction=FLAGS.predict_heads)
     valid_sampler = DistributedSampler(valid_dataset, rank=global_rank, shuffle=False)
     valid_dataloader = DataLoader(valid_dataset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers, sampler=valid_sampler,
                                   drop_last=True, collate_fn=valid_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
@@ -223,9 +227,9 @@ def inference_only(global_rank, local_rank, world):
 
     base_dataset = load_dataset(FLAGS.root_data_dir, FLAGS.dataset)
     if FLAGS.validation_only:
-        eval_dataset = KGValidationDataset(base_dataset)
+        eval_dataset = KGValidationDataset(base_dataset, head_prediction=FLAGS.predict_heads)
     else:
-        eval_dataset = KGTestDataset(base_dataset)
+        eval_dataset = KGTestDataset(base_dataset, head_prediction=FLAGS.predict_heads)
 
     num_ranks = world.size()
     idxs_per_rank = math.ceil(len(eval_dataset) / num_ranks)
