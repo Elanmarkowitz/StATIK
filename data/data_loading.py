@@ -37,6 +37,11 @@ class KGProcessedDataset(Dataset):
         self.feature_dim = self.entity_feat.shape[1]
         self.valid_dict = dataset.valid_dict
         self.test_dict = dataset.test_dict
+        if hasattr(dataset, 'valid_edge_lccsr'):
+            self.valid_edge_lccsr = dataset.valid_edge_lccsr
+            self.valid_relation_lccsr = dataset.valid_relation_lccsr
+            self.test_edge_lccsr = dataset.test_edge_lccsr
+            self.test_relation_lccsr = dataset.test_relation_lccsr
 
     @staticmethod
     def init_post_processing(processed_dataset):

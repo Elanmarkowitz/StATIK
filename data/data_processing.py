@@ -203,6 +203,11 @@ def load_processed_data(root_data_dir: str, dataset_name: str) -> WikiKG90MDatas
     # dataset.relation_csr = sp.load_npz(os.path.join(save_dir, 'rel_csr.npz'))
     dataset.edge_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, 'edge_lccsr.npz'))
     dataset.relation_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, 'rel_lccsr.npz'))
+    if os.path.isfile(os.path.join(save_dir, 'valid_rel_lccsr.npz')):
+        dataset.valid_edge_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, 'valid_edge_lccsr.npz'))
+        dataset.valid_relation_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, 'valid_rel_lccsr.npz'))
+        dataset.test_edge_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, 'test_edge_lccsr.npz'))
+        dataset.test_relation_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, 'test_rel_lccsr.npz'))
     if os.path.isfile(os.path.join(save_dir, 'valid_dict.pkl')):
         dataset.valid_dict = pickle.load(open(os.path.join(save_dir, 'valid_dict.pkl'), 'rb'))
     if os.path.isfile(os.path.join(save_dir, 'test_dict.pkl')):
