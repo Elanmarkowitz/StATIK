@@ -144,16 +144,17 @@ def process_data(root_data_dir: str, dataset_name: str) -> None:
 
     if hasattr(dataset, 'valid_hrt') or hasattr(dataset, 'test_hrt'):
         total = np.concatenate((dataset.train_hrt, dataset.valid_hrt, dataset.test_hrt), axis=0)
-        valid_rel_lccsr, valid_edge_lccsr, _, _, _ = create_lccsr(dataset.num_entities, len(dataset.valid_hrt),
-                                                                  dataset.valid_hrt[:, 0],
-                                                                  dataset.valid_hrt[:, 1],
-                                                                  dataset.valid_hrt[:, 2],
-                                                                  dataset.valid_hrt[:, 1] + dataset.num_relations)
-        test_rel_lccsr, test_edge_lccsr, _, _, _ = create_lccsr(dataset.num_entities, len(dataset.test_hrt),
-                                                                dataset.test_hrt[:, 0],
-                                                                dataset.test_hrt[:, 1],
-                                                                dataset.test_hrt[:, 2],
-                                                                dataset.test_hrt[:, 1] + dataset.num_relations)
+        valid_graph = np.concatenate((dataset.train_hrt, dataset.valid_hrt), axis=0)
+        valid_rel_lccsr, valid_edge_lccsr, _, _, _ = create_lccsr(dataset.num_entities, len(valid_graph),
+                                                                  valid_graph[:, 0],
+                                                                  valid_graph[:, 1],
+                                                                  valid_graph[:, 2],
+                                                                  valid_graph[:, 1] + dataset.num_relations)
+        test_rel_lccsr, test_edge_lccsr, _, _, _ = create_lccsr(dataset.num_entities, len(total),
+                                                                total[:, 0],
+                                                                total[:, 1],
+                                                                total[:, 2],
+                                                                total[:, 1] + dataset.num_relations)
         valid_rel_lccsr.save(os.path.join(save_dir, 'valid_rel_lccsr.npz'))
         valid_edge_lccsr.save(os.path.join(save_dir, 'valid_edge_lccsr.npz'))
         test_rel_lccsr.save(os.path.join(save_dir, 'test_rel_lccsr.npz'))
