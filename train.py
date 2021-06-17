@@ -17,6 +17,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader, DistributedSampler, Subset
 from tqdm import tqdm
 
+from attributed_eval import AttributedEvaluator, convert_stats_to_percentiles
 from data.data_loading import load_dataset, KGProcessedDataset, KGValidationDataset, KGEvaluationDataset, KGTestDataset
 from evaluation import compute_eval_stats
 from model.kg_completion_gnn import KGCompletionGNN
@@ -28,13 +29,14 @@ flags.DEFINE_string("root_data_dir", "/nas/home/elanmark/data", "Root data dir f
 
 flags.DEFINE_bool("distributed", True, "Indicate whether to use distributed training.")
 flags.DEFINE_integer("num_workers", 0, "Number of workers for the dataloader.")
-flags.DEFINE_integer("local_rank", 0, "How frequently to print learning statistics in number of iterations") # TODO: Change description here
+flags.DEFINE_integer("local_rank", 0, "How frequently to print learning statistics in number of iterations")  # TODO: Change description here
 flags.DEFINE_integer("print_freq", 1024, "How frequently to print learning statistics in number of iterations")
 flags.DEFINE_string("device", "cuda", "Device to use (cuda/cpu).")
 flags.DEFINE_string("checkpoint", None, "Resume training from checkpoint file in checkpoints directory.")
 flags.DEFINE_string("name", "run01", "A name to use for saving the run.")
 
 flags.DEFINE_integer("batch_size", 100, "Batch size. Number of triples.")
+flags.DEFINE_integer("neg_samples", 1, "Number of neg samples per positive tail during training.")
 flags.DEFINE_integer("samples_per_node", 10, "Number of neighbors to sample for each entity in a query triple.")
 flags.DEFINE_integer("embed_dim", 256, "Number of dimensions for hidden states.")
 flags.DEFINE_integer("layers", 2, "Number of message passing and edge update layers for model.")
@@ -51,6 +53,7 @@ flags.DEFINE_bool('test_only', False, 'Whether or not to do a complete inference
 flags.DEFINE_string('model_path_depr', None, 'DEPRECATED: Path where the model is saved')
 flags.DEFINE_string('model_path', None, 'Path where the model is saved (inference only)')
 flags.DEFINE_string("test_save_dir", "test_submissions", "Directory to save test results file in.")
+flags.DEFINE_bool("validation_attribution", False, "Whether to perform validation attribution on full validation runs")
 
 CHECKPOINT_DIR = "checkpoints"
 
@@ -67,7 +70,7 @@ def prepare_batch_for_model(batch, dataset: KGProcessedDataset, save_batch=False
 
 
 def move_batch_to_device(batch, device):
-    ht_tensor, r_tensor, entity_set, entity_feat,  indeg_feat, outdeg_feat,queries, labels, r_queries, r_relatives, h_or_t_sample = batch
+    ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = batch
     ht_tensor = ht_tensor.to(device)
     r_tensor = r_tensor.to(device)
     entity_feat = entity_feat.to(device)
@@ -92,7 +95,7 @@ def train(global_rank, local_rank, world):
     train_sampler = DistributedSampler(dataset, rank=global_rank, shuffle=True)
     train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size,
                               num_workers=FLAGS.num_workers, sampler=train_sampler,
-                              collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, sample_negs=1))
+                              collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, sample_negs=FLAGS.neg_samples))
 
     valid_dataset = KGValidationDataset(dataset)
     valid_sampler = DistributedSampler(valid_dataset, rank=global_rank, shuffle=False)
@@ -102,7 +105,7 @@ def train(global_rank, local_rank, world):
     if FLAGS.checkpoint is not None:
         model = load_model(os.path.join(CHECKPOINT_DIR, FLAGS.checkpoint), ignore_state_dict=(global_rank != 0))
     else:
-        model = KGCompletionGNN(dataset.relation_feat, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, decoder=FLAGS.decoder)
+        model = KGCompletionGNN(dataset.relation_feat, dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, decoder=FLAGS.decoder)
 
     model.to(local_rank)
 
@@ -159,7 +162,7 @@ def train(global_rank, local_rank, world):
             scheduler.step()
 
         if global_rank == 0:
-            save_checkpoint(ddp_model.module, epoch+1, opt, scheduler, os.path.join(CHECKPOINT_DIR, f"{FLAGS.name}_e{epoch}.pkl"))
+            save_checkpoint(ddp_model.module, epoch + 1, opt, scheduler, os.path.join(CHECKPOINT_DIR, f"{FLAGS.name}_e{epoch}.pkl"))
 
 
 def train_inner(model, train_loader, opt, dataset, device, print_output=True):
@@ -233,7 +236,7 @@ def inference_only(global_rank, local_rank, world):
 
     subset = Subset(eval_dataset, rank_idxs)
     eval_dataloader = DataLoader(subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
-                                   collate_fn=eval_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
+                                 collate_fn=eval_dataset.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
 
     assert FLAGS.model_path_depr is not None or FLAGS.model_path is not None, 'Must be supplied with model to do inference.'
     if FLAGS.model_path_depr is not None:
@@ -260,6 +263,8 @@ def inference_only(global_rank, local_rank, world):
         result = validate(eval_dataset, eval_dataloader, ddp_model, global_rank, local_rank, gather_sizes, FLAGS.validation_batches, world)
         if global_rank == 0:
             print('Validation ' + ' '.join([f'{k}={result[k]}' for k in result.keys()]))
+
+
     else:
         test(eval_dataset, eval_dataloader, ddp_model, global_rank, local_rank, gather_sizes, None, world)
 
@@ -278,7 +283,7 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
                 subbatch = move_batch_to_device(subbatch, local_rank)
                 ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, _, r_queries, r_relatives, h_or_t_sample = subbatch
                 subbatch_preds = model(ht_tensor, r_tensor, r_queries, entity_feat, r_relatives, h_or_t_sample, queries)
-                subbatch_preds = subbatch_preds.reshape(dataloader.batch_size, -1)  # TODO: inferring number of candidates, check that this is right.
+                subbatch_preds = subbatch_preds.reshape(t_correct_index.shape[0], -1)  # TODO: inferring number of candidates, check that this is right.
                 preds.append(subbatch_preds)
             preds = torch.cat(preds, dim=1)
             t_pred_top10 = preds.topk(10).indices
@@ -309,7 +314,7 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
         aggregated_correct_indices = gather_results(t_correct_index, global_rank, local_rank, gather_sizes, world)
 
     aggregated_full_preds = None
-    if full_preds:
+    if use_full_preds:
         full_preds = torch.cat(full_preds, dim=0)
         aggregated_full_preds = gather_results(full_preds, global_rank, local_rank, gather_sizes, world)
 
@@ -329,7 +334,43 @@ def validate(valid_dataset: KGValidationDataset, valid_dataloader: DataLoader, m
                                                                           global_rank, local_rank, gather_sizes,
                                                                           num_batches, world,
                                                                           use_full_preds=use_full_preds)
+
     if global_rank == 0:
+        if FLAGS.validation_attribution and FLAGS.validation_only:
+            input_dict = {'h,r->t': {'t_pred_top10': top10_preds.cpu().numpy(),
+                                     't_correct_index': correct_indices.cpu().numpy(),
+                                     'hr': valid_dataset.hr,
+                                     't_candidate': valid_dataset.t_candidate}}
+
+            stats_dict = {}
+            stats_dict_thresholds = {}
+            indegrees, indegrees_thresholds = convert_stats_to_percentiles(valid_dataset.ds.indegrees)
+            stats_dict['t_indegree'] = indegrees
+            stats_dict_thresholds['t_indegree'] = indegrees_thresholds
+            t_outdegree, t_outdegree_thresholds = convert_stats_to_percentiles(valid_dataset.ds.outdegrees)
+            stats_dict['t_outdegree'] = t_outdegree
+            stats_dict_thresholds['t_outdegree'] = t_outdegree_thresholds
+            t_degree, t_degree_thresholds = convert_stats_to_percentiles(valid_dataset.ds.degrees)
+            stats_dict['t_degree'] = t_degree
+            stats_dict_thresholds['t_degree'] = t_degree_thresholds
+            h_indegree, h_indegree_thresholds = convert_stats_to_percentiles(valid_dataset.ds.indegrees)
+            stats_dict['h_indegree'] = h_indegree
+            stats_dict_thresholds['h_indegree'] = h_indegree_thresholds
+            h_outdegree, h_outdegree_thresholds = convert_stats_to_percentiles(valid_dataset.ds.outdegrees)
+            stats_dict['h_outdegree'] = h_outdegree
+            stats_dict_thresholds['h_outdegree'] = h_outdegree_thresholds,
+            h_degree, h_degree_thresholds = convert_stats_to_percentiles(valid_dataset.ds.degrees)
+            stats_dict['h_degree'] = h_degree
+            stats_dict_thresholds['h_degree'] = h_degree_thresholds
+            r_frequency, r_frequency_thresholds = convert_stats_to_percentiles(np.unique(valid_dataset.ds.train_r, return_counts=True)[1])
+            stats_dict['r_frequency'] = r_frequency
+            stats_dict_thresholds['r_frequency'] = r_frequency_thresholds
+
+            attr_evaluator = AttributedEvaluator()
+            results = attr_evaluator.eval(input_dict, stats_dict)
+            pickle.dump(results, open("validation_analysis.pkl", "wb"))
+            pickle.dump(stats_dict_thresholds, open("analysis_thresholds.pkl", "wb"))
+
         if use_full_preds:
             result_dict = compute_eval_stats(full_preds.detach().cpu().numpy(),
                                              correct_indices.detach().cpu().numpy(),
@@ -373,6 +414,8 @@ def gather_results(data: torch.Tensor, global_rank, local_rank, gather_sizes, wo
 
     for size in gather_sizes:
         gather_list.append(torch.empty(size, *data.shape[1:], dtype=data.dtype, device=local_rank))
+
+    dist.barrier()
 
     if global_rank == 0:
         gather_list[0] = data

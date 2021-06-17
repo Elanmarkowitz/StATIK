@@ -152,7 +152,7 @@ class RelationCorrelationModel(nn.Module):
         selected_embed = all_embed[r_relative, h_or_t_sample, torch.arange(r_relative.shape[0])]
 
         # query relationship does not pass information
-        selected_embed = selected_embed * torch.logical_not(queries).float().view(-1,1)
+        selected_embed = selected_embed * torch.logical_not(queries).float().view(-1, 1)
 
         aggregated_to_nodes = MessagePassingLayer.aggregate_messages(ht, selected_embed, selected_embed, num_nodes)
 
@@ -160,7 +160,7 @@ class RelationCorrelationModel(nn.Module):
         query_entities = ht[query_idx]
         query_r_type = r_tensor[query_idx]
 
-        aggregated_to_query = aggregated_to_nodes[query_entities[:,0]] + aggregated_to_nodes[query_entities[:,1]]
+        aggregated_to_query = aggregated_to_nodes[query_entities[:, 0]] + aggregated_to_nodes[query_entities[:, 1]]
 
         final_query_embedding = self.final_embedding(torch.cat([aggregated_to_query, self.relation_correlation_embedding(query_r_type)], dim=1))
 
@@ -168,7 +168,7 @@ class RelationCorrelationModel(nn.Module):
 
 
 class KGCompletionGNN(nn.Module):
-    def __init__(self, relation_feat, input_dim: int, embed_dim: int, num_layers: int, norm: int=2, decoder: str = "MLP+TransE"):
+    def __init__(self, relation_feat, num_relations: int, input_dim: int, embed_dim: int, num_layers: int, norm: int = 2, decoder: str = "MLP+TransE"):
         super(KGCompletionGNN, self).__init__()
 
         local_vals = locals()
@@ -179,13 +179,14 @@ class KGCompletionGNN(nn.Module):
         self.num_layers = num_layers
         self.norm = norm
 
-        self.relation_embedding = nn.Embedding(relation_feat.shape[0], relation_feat.shape[1])
-        self.relation_embedding.weight = nn.Parameter(torch.tensor(relation_feat, dtype=torch.float))
+        self.relation_embedding = nn.Embedding(num_relations, input_dim)
+        if relation_feat is not None:
+            self.relation_embedding.weight = nn.Parameter(torch.tensor(relation_feat, dtype=torch.float))
         self.relation_embedding.weight.requires_grad = False  # Comment to learn through message passing relation embedding table
         self.relative_direction_embedding = nn.Embedding(2, embed_dim)
         self.head_or_tail_edge_embedding = nn.Embedding(2, embed_dim)
 
-        self.edge_input_transform = nn.Linear(relation_feat.shape[1], embed_dim)
+        self.edge_input_transform = nn.Linear(input_dim, embed_dim)
 
         self.entity_input_transform = nn.Linear(input_dim, embed_dim)
 
@@ -199,11 +200,12 @@ class KGCompletionGNN(nn.Module):
             self.message_passing_layers.append(MessagePassingLayer(embed_dim))
             self.edge_update_layers.append(EdgeUpdateLayer(embed_dim))
 
-        self.relation_correlation_model = RelationCorrelationModel(relation_feat.shape[0], embed_dim)
+        self.relation_correlation_model = RelationCorrelationModel(num_relations, embed_dim)
 
         self.decoder = decoder
         self.classify_triple = TripleClassificationLayer(embed_dim)
-        self.transE_decoder = TransEDecoder(relation_feat.shape[0], embed_dim)
+        self.transE_decoder = TransEDecoder(num_relations, embed_dim)
+        self.conv_decoder = ConvolutionDecoder(embed_dim)
 
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
@@ -238,6 +240,13 @@ class KGCompletionGNN(nn.Module):
                 out = (mlp_out.flatten(), transe_out)
             else:
                 out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
+        elif self.decoder == "MLP+Conv":
+            if self.training:
+                mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
+                conv_out = self.conv_decoder(H, E, ht, queries)
+                out = (mlp_out.flatten(), conv_out)
+            else:
+                out = self.conv_decoder(H, E, ht, queries)
         elif self.decoder == "RelCorr+TransE":
             rel_corr_score = self.relation_correlation_model(ht, r_query, r_tensor, r_relative, h_or_t_sample, queries,
                                                              entity_feat.shape[0])
@@ -262,6 +271,9 @@ class KGCompletionGNN(nn.Module):
         elif self.decoder == "MLP+TransE":
             self.margin = margin
             return self.combo_loss
+        elif self.decoder == "MLP+Conv":
+            self.margin = margin
+            return self.combo_loss
         elif self.decoder == "RelCorr+TransE":
             self.margin = margin
             return self.margin_ranking_loss
@@ -275,8 +287,15 @@ class KGCompletionGNN(nn.Module):
         distances = -1 * scores
         positives = labels.nonzero(as_tuple=False).flatten()
         negatives = (labels == 0).nonzero(as_tuple=False).flatten()
+
         pos_distances = distances[positives]
         neg_distances = distances[negatives]
+
+        negs_per_pos = neg_distances.shape[0] // pos_distances.shape[0]
+
+        neg_distances = neg_distances.reshape(-1, negs_per_pos)
+        pos_distances = pos_distances.reshape(-1, 1).expand(-1, negs_per_pos)
+
         target = torch.tensor([-1], dtype=torch.long, device=scores.device)
         return F.margin_ranking_loss(pos_distances, neg_distances, target, margin=self.margin)
 
@@ -314,3 +333,52 @@ class TransEDecoder(nn.Module):
         tail_embeds = F.normalize(tail_embeds, p=2, dim=1)
         distances = torch.norm(head_embeds + relation_embeds - tail_embeds, p=p, dim=1)
         return distances
+
+
+class ConvolutionDecoder(nn.Module):
+    def __init__(self, embed_dim, channels_1=32, channels_2=16, kernel_size=3, height_dim=32, dropout=0.2):
+        super(ConvolutionDecoder, self).__init__()
+        self.embed_dim = embed_dim
+        self.height_dim = height_dim
+        self.channels_1 = channels_1
+        self.channels_2 = channels_2
+        self.kernel_size = kernel_size
+
+        assert embed_dim % height_dim == 0, '{} does not divide {} without remainder'.format(height_dim, embed_dim)
+
+        self.width_dim = int(self.embed_dim / self.height_dim)
+        self.out_height = self.height_dim + 3 * (1 - self.kernel_size)
+        self.out_width = self.width_dim + 3 * (1 - self.kernel_size)
+
+        self.conv1 = nn.Conv2d(3, self.channels_1, kernel_size=(self.kernel_size, self.kernel_size))
+        self.conv2 = nn.Conv2d(self.channels_1, self.channels_2, kernel_size=(self.kernel_size, self.kernel_size))
+        self.conv3 = nn.Conv2d(self.channels_2, 1, kernel_size=(self.kernel_size, self.kernel_size))
+        self.output = nn.Linear(self.out_height * self.out_width, 1)
+        self.drop2d = nn.Dropout2d(p=dropout)
+        self.drop = nn.Dropout(p=dropout)
+
+        self.act = nn.ReLU()
+
+    def forward(self, H, E, ht, queries):
+        query_idxs = queries.nonzero().flatten()
+
+        ht_q = ht[query_idxs]
+        head_embs = H[ht_q[:, 0]].reshape(-1, self.height_dim, self.width_dim)
+        tail_embs = H[ht_q[:, 1]].reshape(-1, self.height_dim, self.width_dim)
+        relation_embs = E[query_idxs].reshape(-1, self.height_dim, self.width_dim)
+
+        hrt_signal = torch.stack([head_embs, relation_embs, tail_embs], dim=1)
+        hrt_signal = self.drop2d(hrt_signal)
+        x = self.conv1(hrt_signal)
+        x = self.act(x)
+        x = self.drop2d(x)
+        x = self.conv2(x)
+        x = self.act(x)
+        x = self.drop2d(x)
+        x = self.conv3(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = x.reshape(x.shape[0], -1)
+        x = self.output(x)
+
+        return x

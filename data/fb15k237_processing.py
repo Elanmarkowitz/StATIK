@@ -33,6 +33,7 @@ class FB15k237Dataset(Dataset):
 
             self.num_entities = stat_dict['num_entities']
             self.num_relations = stat_dict['num_relations']
+            self.relation_feat = None
 
 
 def process_dataset(dataset_path):
