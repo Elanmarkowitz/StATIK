@@ -147,6 +147,11 @@ def train(global_rank, local_rank, world):
 
             moving_average_loss = .999 * moving_average_loss + 0.001 * loss.detach()
 
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            scheduler.step()
+
             if (i + 1) % FLAGS.print_freq == 0:
                 dist.all_reduce(moving_average_loss, group=world)
                 moving_average_loss /= dist.get_world_size()
@@ -173,11 +178,6 @@ def train(global_rank, local_rank, world):
 
 
                     print('Current MRR = {}, Best MRR = {}'.format(mrr, max_mrr))
-
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-            scheduler.step()
 
         if global_rank == 0:
             save_checkpoint(ddp_model.module, epoch + 1, opt, scheduler, os.path.join(CHECKPOINT_DIR, f"{FLAGS.name}_e{epoch}.pkl"))
