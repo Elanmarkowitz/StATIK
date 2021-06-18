@@ -44,6 +44,7 @@ class KGProcessedDataset(Dataset):
             self.valid_relation_lccsr = dataset.valid_relation_lccsr
             self.test_edge_lccsr = dataset.test_edge_lccsr
             self.test_relation_lccsr = dataset.test_relation_lccsr
+        self.training_entities = np.unique(self.train_ht)
 
     @staticmethod
     def init_post_processing(processed_dataset):
@@ -176,9 +177,15 @@ class KGProcessedDataset(Dataset):
             neg_candidates = np.empty((len(batch), 0), dtype=np.int64)
             neg_h_candiates = np.empty((len(batch), 0), dtype=np.int64)
             if sample_negs:
-                neg_candidates = np.random.randint(0, self.num_entities, size=(len(batch), sample_negs))
+                if mode == 'train':
+                    neg_candidates = self.training_entities[np.random.randint(0, len(self.training_entities), size=(len(batch), sample_negs))]
+                else:
+                    neg_candidates = np.random.randint(0, self.num_entities, size=(len(batch), sample_negs))
                 if neg_heads:
-                    neg_h_candiates = np.random.randint(0, self.num_entities, size=(len(batch), sample_negs))
+                    if mode == 'train':
+                        neg_h_candiates = self.training_entities[np.random.randint(0, len(self.training_entities), size=(len(batch), sample_negs))]
+                    else:
+                        neg_h_candiates = np.random.randint(0, self.num_entities, size=(len(batch), sample_negs))
 
             for (_h, _r, _ts), _neg_ts, _neg_hs in zip(batch, neg_candidates, neg_h_candiates):
                 t_candidates = np.concatenate([_ts, _neg_ts])
