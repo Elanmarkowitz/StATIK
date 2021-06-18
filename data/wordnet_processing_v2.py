@@ -67,22 +67,17 @@ class ProcessWordNet(object):
         tar.extractall(ROOT_DIR)
         tar.close()
 
-
-
-    def read_triples(self, filename):
+    def read_triples(self, filename) -> pd.DataFrame:
         triples = pd.read_csv(os.path.join(self.data_dir, filename), names=['h', 'r', 't'], sep='\t')
         return triples
-
 
     def read_descriptions(self):
         ent_desc = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['ent_desc']), names=['code', 'description'], sep='\t')
         rel_desc = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['rel_desc']), names=['code', 'description'], sep='\t')
         return ent_desc, rel_desc
 
-
     def write_to_npy(self, np_array, filename):
         np.save(os.path.join(self.data_dir, 'processed', filename[:-len('txt')] + 'npy'), np_array)
-
 
     def load_from_npy(self, filename):
         return np.load(os.path.join(self.data_dir, 'processed', filename[:-len('txt')] + 'npy'), allow_pickle=True)
@@ -113,9 +108,9 @@ class ProcessWordNet(object):
             'r': self.relation2id,
             't': self.entity2id}
 
-        self.train_hrt = np.asarray(self.train_hrt.replace(to_replace=to_replace_dct).values, dtype=np.int)
-        self.valid_hrt = np.asarray(self.valid_hrt.replace(to_replace=to_replace_dct).values, dtype=np.int)
-        self.test_hrt = np.asarray(self.test_hrt.replace(to_replace=to_replace_dct).values, dtype=np.int)
+        self.train_hrt = np.asarray(self.replace_hrt(self.train_hrt, to_replace_dct).values, dtype=np.int)
+        self.valid_hrt = np.asarray(self.replace_hrt(self.valid_hrt, to_replace_dct).values, dtype=np.int)
+        self.test_hrt = np.asarray(self.replace_hrt(self.test_hrt, to_replace_dct).values, dtype=np.int)
 
         with open(os.path.join(self.data_dir, 'processed', 'ent2id.pkl'), 'wb') as fp:
             pickle.dump(self.entity2id, fp)
@@ -184,6 +179,12 @@ class ProcessWordNet(object):
         model = SentenceTransformer('stsb-distilroberta-base-v2')
         self.entity_feat = model.encode(self.entity_descs['description'].values)
         self.relation_feat = model.encode(self.relation_descs['description'].values)
+
+    @staticmethod
+    def replace_hrt(hrt: pd.DataFrame, map_dict):
+        for key in map_dict.keys():
+            hrt[key] = hrt[key].map(map_dict[key])
+        return hrt
 
 
 if __name__ == "__main__":
