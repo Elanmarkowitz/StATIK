@@ -136,6 +136,8 @@ def train(global_rank, local_rank, world):
     max_mrr = 0
 
     for epoch in range(start_epoch, FLAGS.epochs):
+        if global_rank == 0:
+            print(f'Epoch {epoch}')
         for i, batch in enumerate(tqdm(train_loader)):
             ddp_model.train()
             batch = prepare_batch_for_model(batch, dataset)
@@ -150,7 +152,7 @@ def train(global_rank, local_rank, world):
             opt.zero_grad()
             loss.backward()
             opt.step()
-            scheduler.step()
+            # scheduler.step()
 
             if (i + 1) % FLAGS.print_freq == 0:
                 dist.all_reduce(moving_average_loss, group=world)
@@ -160,24 +162,24 @@ def train(global_rank, local_rank, world):
                     print(f"Iteration={i}/{len(train_loader)}, "
                           f"Moving Avg Loss={moving_average_loss.cpu().numpy():.5f}")
 
-            if (i + 1) % FLAGS.validate_every == 0:
-                ddp_model.eval()
-                gather_sizes = [FLAGS.valid_batch_size * FLAGS.validation_batches] * world.size()
-                result = validate(valid_dataset, valid_dataloader, ddp_model, global_rank, local_rank, gather_sizes, num_batches=FLAGS.validation_batches,
-                                  world=world)
-                if FLAGS.predict_heads:
-                    result2 = validate(valid_dataset_head, valid_dataloader_head, ddp_model, global_rank, local_rank,
-                                       gather_sizes, num_batches=FLAGS.validation_batches, world=world)
-                    if global_rank == 0:
-                        result['mrr'] = 0.5*result['mrr'] + 0.5*result2['mrr']
+        if (epoch + 1) % FLAGS.validate_every == 0:
+            ddp_model.eval()
+            gather_sizes = [FLAGS.valid_batch_size * FLAGS.validation_batches] * world.size()
+            result = validate(valid_dataset, valid_dataloader, ddp_model, global_rank, local_rank, gather_sizes, num_batches=FLAGS.validation_batches,
+                              world=world)
+            if FLAGS.predict_heads:
+                result2 = validate(valid_dataset_head, valid_dataloader_head, ddp_model, global_rank, local_rank,
+                                   gather_sizes, num_batches=FLAGS.validation_batches, world=world)
                 if global_rank == 0:
-                    mrr = result['mrr']
-                    if mrr > max_mrr:
-                        max_mrr = mrr
-                        save_model(ddp_model.module, os.path.join(CHECKPOINT_DIR, f'{FLAGS.name}_best_model.pkl'))
+                    result['mrr'] = 0.5*result['mrr'] + 0.5*result2['mrr']
+            if global_rank == 0:
+                mrr = result['mrr']
+                if mrr > max_mrr:
+                    max_mrr = mrr
+                    save_model(ddp_model.module, os.path.join(CHECKPOINT_DIR, f'{FLAGS.name}_best_model.pkl'))
 
 
-                    print('Current MRR = {}, Best MRR = {}'.format(mrr, max_mrr))
+                print('Current MRR = {}, Best MRR = {}'.format(mrr, max_mrr))
 
         if global_rank == 0:
             save_checkpoint(ddp_model.module, epoch + 1, opt, scheduler, os.path.join(CHECKPOINT_DIR, f"{FLAGS.name}_e{epoch}.pkl"))
@@ -302,44 +304,44 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
                 ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, _, r_queries, r_relatives, h_or_t_sample = subbatch
                 subbatch_preds = model(ht_tensor, r_tensor, r_queries, entity_feat, r_relatives, h_or_t_sample, queries)
                 subbatch_preds = subbatch_preds.reshape(t_correct_index.shape[0], -1)  # TODO: inferring number of candidates, check that this is right.
-                preds.append(subbatch_preds)
+                preds.append(subbatch_preds.detach().cpu())
             preds = torch.cat(preds, dim=1)
             t_pred_top10 = preds.topk(10).indices
-            t_pred_top10 = t_pred_top10.detach()
+            t_pred_top10 = t_pred_top10.detach().cpu()
             top_10s.append(t_pred_top10)
 
             if t_filter_mask is not None:
-                filter_masks.append(torch.from_numpy(t_filter_mask).to(local_rank))
+                filter_masks.append(torch.from_numpy(t_filter_mask))
 
             if use_full_preds:
                 full_preds.append(preds.detach())
 
             if isinstance(dataset, KGValidationDataset):
-                t_correct_index = torch.tensor(t_correct_index, device=local_rank)
+                t_correct_index = torch.tensor(t_correct_index)
                 t_corrects.append(t_correct_index)
             if num_batches and num_batches == (i + 1):
                 break
 
             if i % 100 == 0:
                 dist.barrier(group=world)
-
+    if global_rank==0: breakpoint()
     t_pred_top10 = torch.cat(top_10s, dim=0)
-    aggregated_top10_preds = gather_results(t_pred_top10, global_rank, local_rank, gather_sizes, world)
+    aggregated_top10_preds = gather_results(t_pred_top10.to(local_rank), global_rank, local_rank, gather_sizes, world).detach().cpu()
 
     aggregated_correct_indices = None
     if isinstance(dataset, KGValidationDataset):
         t_correct_index = torch.cat(t_corrects, dim=0)
-        aggregated_correct_indices = gather_results(t_correct_index, global_rank, local_rank, gather_sizes, world)
+        aggregated_correct_indices = gather_results(t_correct_index.to(local_rank), global_rank, local_rank, gather_sizes, world).detach().cpu()
 
     aggregated_full_preds = None
     if use_full_preds:
         full_preds = torch.cat(full_preds, dim=0)
-        aggregated_full_preds = gather_results(full_preds, global_rank, local_rank, gather_sizes, world)
+        aggregated_full_preds = gather_results(full_preds.to(local_rank), global_rank, local_rank, gather_sizes, world).detach().cpu()
 
     aggregated_filter_masks = None
     if filter_masks:
         filter_masks = torch.cat(filter_masks, dim=0)
-        aggregated_filter_masks = gather_results(filter_masks, global_rank, local_rank, gather_sizes, world)
+        aggregated_filter_masks = gather_results(filter_masks.to(local_rank), global_rank, local_rank, gather_sizes, world).detach().cpu()
 
     return aggregated_top10_preds, aggregated_correct_indices, aggregated_full_preds, aggregated_filter_masks
 
