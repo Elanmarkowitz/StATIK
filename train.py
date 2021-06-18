@@ -110,7 +110,7 @@ def train(global_rank, local_rank, world):
         valid_dataset_head = KGValidationDataset(dataset, head_prediction=True)
         valid_sampler_head = DistributedSampler(valid_dataset_head, rank=global_rank, shuffle=False)
         valid_dataloader_head = DataLoader(valid_dataset_head, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
-                                           sampler=valid_sampler,
+                                           sampler=valid_sampler_head,
                                            drop_last=True, collate_fn=valid_dataset_head.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
 
 
