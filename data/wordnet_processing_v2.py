@@ -113,9 +113,9 @@ class ProcessWordNet(object):
             'r': self.relation2id,
             't': self.entity2id}
 
-        self.train_hrt = np.asarray(self.train_hrt.replace(to_replace=to_replace_dct).values)
-        self.valid_hrt = np.asarray(self.valid_hrt.replace(to_replace=to_replace_dct).values)
-        self.test_hrt = np.asarray(self.test_hrt.replace(to_replace=to_replace_dct).values)
+        self.train_hrt = np.asarray(self.train_hrt.replace(to_replace=to_replace_dct).values, dtype=np.int)
+        self.valid_hrt = np.asarray(self.valid_hrt.replace(to_replace=to_replace_dct).values, dtype=np.int)
+        self.test_hrt = np.asarray(self.test_hrt.replace(to_replace=to_replace_dct).values, dtype=np.int)
 
         with open(os.path.join(self.data_dir, 'processed', 'ent2id.pkl'), 'wb') as fp:
             pickle.dump(self.entity2id, fp)
@@ -151,18 +151,25 @@ class ProcessWordNet(object):
         self.entity2id = defaultdict(int)
         train_ent = set(self.train_hrt['h'].values)
         train_ent.update(set(self.train_hrt['t'].values))
-        for idx, wn_id in enumerate(train_ent):
-            self.entity2id[wn_id] = idx
+        idx = 0
+        for wn_id in train_ent:
+            if wn_id not in self.entity2id:
+                self.entity2id[wn_id] = idx
+                idx += 1
 
         dev_ent = set(self.valid_hrt['h'].values)
         dev_ent.update(self.valid_hrt['t'].values)
-        for idx, wn_id in enumerate(dev_ent):
-            self.entity2id[wn_id] = idx
+        for wn_id in dev_ent:
+            if wn_id not in self.entity2id:
+                self.entity2id[wn_id] = idx
+                idx += 1
 
         test_ent = set(self.test_hrt['h'].values)
         test_ent.update(self.test_hrt['t'].values)
-        for idx, wn_id in enumerate(test_ent):
-            self.entity2id[wn_id] = idx
+        for wn_id in test_ent:
+            if wn_id not in self.entity2id:
+                self.entity2id[wn_id] = idx
+                idx += 1
 
 
 
