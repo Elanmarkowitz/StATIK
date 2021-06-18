@@ -324,7 +324,7 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
 
             if i % 100 == 0:
                 dist.barrier(group=world)
-    if global_rank==0: breakpoint()
+
     t_pred_top10 = torch.cat(top_10s, dim=0)
     aggregated_top10_preds = gather_results(t_pred_top10.to(local_rank), global_rank, local_rank, gather_sizes, world).detach().cpu()
 
