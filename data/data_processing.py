@@ -162,31 +162,33 @@ def process_data(root_data_dir: str, dataset_name: str) -> None:
     if hasattr(dataset, 'valid_hrt'):
         num_valid = dataset.valid_hrt[:, [0, 1]].shape[0]
         valid_cand = np.tile(np.arange(0, dataset.num_entities), num_valid)
-        filtered_cand = get_filtered_candidate(dataset.valid_hrt[:, [0, 1]], total, dataset.num_entities)
+        filtered_cand_t = get_filtered_candidate(dataset.valid_hrt[:, [0, 1]], total, dataset.num_entities)
+        filtered_cand_h = get_filtered_candidate(dataset.valid_hrt[:, [2, 1]], total, dataset.num_entities)
         valid_dict = {'h,r->t': {
             'hr': dataset.valid_hrt[:, [0, 1]],
             't_candidate': valid_cand.reshape((num_valid, dataset.num_entities)),  # this needs to be repeated for each validation triple shape: (num valid, num_entities)
-            't_candidate_filter_mask': filtered_cand.reshape((num_valid, dataset.num_entities)),
+            't_candidate_filter_mask': filtered_cand_t.reshape((num_valid, dataset.num_entities)),
             't_correct_index': dataset.valid_hrt[:, 2],
-            'tr': None, # TODO
-            'h_candidate': None,
-            'h_candidate_filter_mask': None,
-            'h_correct_index': None
+            'tr': dataset.valid_hrt[:, [2, 1]],
+            'h_candidate': valid_cand.reshape((num_valid, dataset.num_entities)),
+            'h_candidate_filter_mask': filtered_cand_h.reshape((num_valid, dataset.num_entities)),
+            'h_correct_index': dataset.valid_hrt[:, 0]
         }}
         pickle.dump(valid_dict, open(os.path.join(save_dir, 'valid_dict.pkl'), 'wb'))
     if hasattr(dataset, 'test_hrt'):
         num_test = dataset.test_hrt[:, [0, 1]].shape[0]
         test_cand = np.tile(np.arange(0, dataset.num_entities), num_test)
-        filtered_cand = get_filtered_candidate(dataset.test_hrt[:, [0, 1]], total, dataset.num_entities)
+        filtered_cand_t = get_filtered_candidate(dataset.test_hrt[:, [0, 1]], total, dataset.num_entities)
+        filtered_cand_h = get_filtered_candidate(dataset.test_hrt[:, [2, 1]], total, dataset.num_entities)
         test_dict = {'h,r->t': {
             'hr': dataset.test_hrt[:, [0, 1]],
             't_candidate': test_cand.reshape((num_test, dataset.num_entities)),
-            't_candidate_filter_mask': filtered_cand.reshape((num_test, dataset.num_entities)),
+            't_candidate_filter_mask': filtered_cand_t.reshape((num_test, dataset.num_entities)),
             't_correct_index': dataset.test_hrt[:, 2],
-            'tr': None,  # TODO
-            'h_candidate': None,
-            'h_candidate_filter_mask': None,
-            'h_correct_index': None
+            'tr': dataset.test_hrt[:, [2, 1]],  # TODO
+            'h_candidate': test_cand.reshape((num_test, dataset.num_entities)),
+            'h_candidate_filter_mask': filtered_cand_h.reshape((num_test, dataset.num_entities)),
+            'h_correct_index': dataset.test_hrt[:, 0]
         }}
         pickle.dump(test_dict, open(os.path.join(save_dir, 'test_dict.pkl'), 'wb'))
 
