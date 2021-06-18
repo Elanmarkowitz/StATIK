@@ -37,7 +37,9 @@ class KGProcessedDataset(Dataset):
         self.feature_dim = self.entity_feat.shape[1]
         self.valid_dict = dataset.valid_dict
         self.test_dict = dataset.test_dict
+        self.access_to_full_graph = False
         if hasattr(dataset, 'valid_edge_lccsr'):
+            self.access_to_full_graph = True
             self.valid_edge_lccsr = dataset.valid_edge_lccsr
             self.valid_relation_lccsr = dataset.valid_relation_lccsr
             self.test_edge_lccsr = dataset.test_edge_lccsr
@@ -62,14 +64,23 @@ class KGProcessedDataset(Dataset):
 
         return batch_ht[0], batch_r, np.array([batch_ht[1]])
 
-    def sample_neighbors(self, node, max_neighbors: int):
+    def sample_neighbors(self, node, max_neighbors: int, mode: str):
+        if mode == "train" or not self.access_to_full_graph:
+            edge_lccsr = self.edge_lccsr
+            relation_lccsr = self.relation_lccsr
+        elif mode == "valid":
+            edge_lccsr = self.valid_edge_lccsr
+            relation_lccsr = self.valid_relation_lccsr
+        else:  # mode == "test"
+            edge_lccsr = self.test_edge_lccsr
+            relation_lccsr = self.test_relation_lccsr
         if self.degrees[node] > max_neighbors:
             selection = np.random.randint(self.degrees[node], size=(max_neighbors,))
-            tails = self.edge_lccsr[node][selection]
-            rels = self.relation_lccsr[node][selection]
+            tails = edge_lccsr[node][selection]
+            rels = relation_lccsr[node][selection]
         else:
-            tails = self.edge_lccsr[node]
-            rels = self.relation_lccsr[node]
+            tails = edge_lccsr[node]
+            rels = relation_lccsr[node]
         return rels, tails
 
     @staticmethod
@@ -146,7 +157,7 @@ class KGProcessedDataset(Dataset):
 
         return
 
-    def get_collate_fn(self, max_neighbors: int = 10, sample_negs: int = 0, neg_heads=False):
+    def get_collate_fn(self, max_neighbors: int = 10, sample_negs: int = 0, neg_heads=False, mode="train"):
         def wikikg_collate_fn(batch):
             # query edge marked as query
             # 1-hop connected entities included
@@ -174,11 +185,11 @@ class KGProcessedDataset(Dataset):
                 sample_labels = np.concatenate([np.ones_like(_ts), np.zeros_like(_neg_ts)])
                 true_t = _ts[0]
 
-                rels_h, tails_h = self.sample_neighbors(_h, max_neighbors)
+                rels_h, tails_h = self.sample_neighbors(_h, max_neighbors, mode=mode)
 
                 for _t, _label in zip(t_candidates, sample_labels):
 
-                    rels_t, tails_t = self.sample_neighbors(_t, max_neighbors)
+                    rels_t, tails_t = self.sample_neighbors(_t, max_neighbors, mode=mode)
 
                     rels_h_t, tails_h_t = self.ignore_query(rels_h, tails_h, _r, _t)
                     rels_t, tails_t = self.ignore_query(rels_t, tails_t, _r + self.num_relations, _h)
@@ -190,7 +201,7 @@ class KGProcessedDataset(Dataset):
                     cumulative_entities += c_size
 
                 if neg_heads:
-                    rels_t, tails_t = self.sample_neighbors(true_t, max_neighbors)
+                    rels_t, tails_t = self.sample_neighbors(true_t, max_neighbors, mode=mode)
                     for _h, _label in zip(_neg_hs, np.zeros_like(_neg_hs)):
                         rels_h, tails_h = self.sample_neighbors(_h, max_neighbors)
 
@@ -272,7 +283,8 @@ class KGEvaluationDataset(Dataset):
 
     def get_eval_collate_fn(self, max_neighbors=10):
         def collate_fn(batch):
-            hrt_collate = self.ds.get_collate_fn(max_neighbors=max_neighbors)
+            mode = "valid" if isinstance(self, KGValidationDataset) else "test"
+            hrt_collate = self.ds.get_collate_fn(max_neighbors=max_neighbors, mode=mode)
             batch_h = array("i")
             batch_r = array("i")
             batch_t_candidates = []
