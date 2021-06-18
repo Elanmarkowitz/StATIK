@@ -203,7 +203,7 @@ class KGProcessedDataset(Dataset):
                 if neg_heads:
                     rels_t, tails_t = self.sample_neighbors(true_t, max_neighbors, mode=mode)
                     for _h, _label in zip(_neg_hs, np.zeros_like(_neg_hs)):
-                        rels_h, tails_h = self.sample_neighbors(_h, max_neighbors)
+                        rels_h, tails_h = self.sample_neighbors(_h, max_neighbors, mode=mode)
 
                         rels_t_h, tails_t_h = self.ignore_query(rels_t, tails_t, _r + self.num_relations, _h)
                         rels_h, tails_h = self.ignore_query(rels_h, tails_h, _r, true_t)
