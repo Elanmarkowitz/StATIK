@@ -320,7 +320,7 @@ class KGEvaluationDataset(Dataset):
             else:
                 out_batches.append(hrt_collate(list(zip(batch_h, batch_r, batch_t_candidates))))
 
-            t_correct_idx = np.array(t_correct_idx) if isinstance(self, KGValidationDataset) else None
+            t_correct_idx = np.array(t_correct_idx) if self.t_correct_index is not None else None
             batch_t_filter_masks = np.array(batch_t_filter_masks) if self.t_candidate_filter_mask is not None else None
 
             return out_batches, t_correct_idx, batch_t_filter_masks

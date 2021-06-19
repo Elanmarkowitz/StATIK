@@ -168,7 +168,8 @@ class RelationCorrelationModel(nn.Module):
 
 
 class KGCompletionGNN(nn.Module):
-    def __init__(self, relation_feat, num_relations: int, input_dim: int, embed_dim: int, num_layers: int, norm: int = 2, decoder: str = "MLP+TransE"):
+    def __init__(self, relation_feat, num_relations: int, input_dim: int, embed_dim: int, num_layers: int,
+                 norm: int = 2, decoder: str = "MLP+TransE", dropout=0.5):
         super(KGCompletionGNN, self).__init__()
 
         local_vals = locals()
@@ -178,6 +179,7 @@ class KGCompletionGNN(nn.Module):
         self.embed_dim = embed_dim
         self.num_layers = num_layers
         self.norm = norm
+        self.dropout = nn.Dropout(p=dropout)
 
         self.relation_embedding = nn.Embedding(num_relations, input_dim)
         if relation_feat is not None:
@@ -203,9 +205,9 @@ class KGCompletionGNN(nn.Module):
         self.relation_correlation_model = RelationCorrelationModel(num_relations, embed_dim)
 
         self.decoder = decoder
-        self.classify_triple = TripleClassificationLayer(embed_dim)
+        # self.classify_triple = TripleClassificationLayer(embed_dim)
         self.transE_decoder = TransEDecoder(num_relations, embed_dim)
-        self.conv_decoder = ConvolutionDecoder(embed_dim)
+        # self.conv_decoder = ConvolutionDecoder(embed_dim)
 
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
@@ -213,7 +215,7 @@ class KGCompletionGNN(nn.Module):
     def forward(self, ht: Tensor, r_tensor: Tensor, r_query: Tensor, entity_feat: Tensor, r_relative, h_or_t_sample, queries: Tensor):
         # Transform entities
 
-        H_0 = self.act(self.entity_input_transform(entity_feat))
+        H_0 = self.act(self.entity_input_transform(self.dropout(entity_feat)))
         H_0 = self.norm_entity(H_0)
         H = H_0
 

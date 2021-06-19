@@ -47,6 +47,7 @@ flags.DEFINE_integer("valid_batch_size", 1, "Batch size for validation (does all
 flags.DEFINE_integer("epochs", 1, "Num epochs to train for")
 flags.DEFINE_float("margin", 1.0, "Margin in transE loss")
 flags.DEFINE_string("decoder", "MLP+TransE", "Choose decoder from [MLP, TransE, MLP+TransE]")
+flags.DEFINE_float("dropout", 0.5, "Dropout on input features.")
 
 flags.DEFINE_bool('validation_only', False, 'Whether or not to do a complete inference run across the validation set')
 flags.DEFINE_bool('test_only', False, 'Whether or not to do a complete inference run across the test set')
@@ -227,7 +228,7 @@ def train_single(device):
     dataset = load_dataset(FLAGS.root_data_dir, FLAGS.dataset)
     train_loader = DataLoader(dataset, batch_size=FLAGS.batch_size, num_workers=FLAGS.num_workers,
                               collate_fn=dataset.get_collate_fn(max_neighbors=FLAGS.samples_per_node, sample_negs=1))
-    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers)
+    model = KGCompletionGNN(dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, FLAGS.dropout)
     model.to(device)
     opt = optim.Adam(model.parameters(), lr=FLAGS.lr)
     train_inner(model, train_loader, opt, dataset, device)
@@ -271,7 +272,7 @@ def inference_only(global_rank, local_rank, world):
     ddp_model = DDP(model, device_ids=[local_rank], process_group=world)
     ddp_model.eval()
 
-    if FLAGS.test_only or FLAGS.validation_batches < 0:
+    if FLAGS.validation_batches < 0:
         FLAGS.validation_batches = None
         gather_sizes = [math.ceil(len(eval_dataset) / num_ranks)] * (num_ranks - 1)
         last_size = len(eval_dataset) - sum(gather_sizes)
@@ -284,13 +285,13 @@ def inference_only(global_rank, local_rank, world):
         if global_rank == 0:
             print('Validation ' + ' '.join([f'{k}={result[k]}' for k in result.keys()]))
 
-
     else:
-        test(eval_dataset, eval_dataloader, ddp_model, global_rank, local_rank, gather_sizes, None, world)
+        test(eval_dataset, eval_dataloader, ddp_model, global_rank, local_rank, gather_sizes, FLAGS.validation_batches, world)
 
 
 def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, global_rank: int, local_rank: int,
                   gather_sizes: list, num_batches: int = None, world=None, use_full_preds=False):
+    model.eval()
     top_10s = []
     t_corrects = []
     full_preds = []
@@ -316,7 +317,7 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
             if use_full_preds:
                 full_preds.append(preds.detach())
 
-            if isinstance(dataset, KGValidationDataset):
+            if t_correct_index is not None:
                 t_correct_index = torch.tensor(t_correct_index)
                 t_corrects.append(t_correct_index)
             if num_batches and num_batches == (i + 1):
@@ -329,7 +330,7 @@ def run_inference(dataset: KGEvaluationDataset, dataloader: DataLoader, model, g
     aggregated_top10_preds = gather_results(t_pred_top10.to(local_rank), global_rank, local_rank, gather_sizes, world).detach().cpu()
 
     aggregated_correct_indices = None
-    if isinstance(dataset, KGValidationDataset):
+    if t_correct_index is not None:
         t_correct_index = torch.cat(t_corrects, dim=0)
         aggregated_correct_indices = gather_results(t_correct_index.to(local_rank), global_rank, local_rank, gather_sizes, world).detach().cpu()
 
@@ -407,15 +408,24 @@ def validate(valid_dataset: KGValidationDataset, valid_dataloader: DataLoader, m
 def test(test_dataset: KGTestDataset, test_dataloader: DataLoader, model, global_rank: int,
          local_rank: int, gather_sizes: list, num_batches: int = None, world=None):
     evaluator = WikiKG90MEvaluator()
-    top10_preds, _, _, _ = run_inference(test_dataset, test_dataloader, model, global_rank, local_rank, gather_sizes,
-                                         num_batches, world)
+    use_full_preds = FLAGS.dataset != "wikikg90m_kddcup2021"
+    top10_preds, correct_indices, full_preds, filter_mask = run_inference(test_dataset, test_dataloader, model,
+                                                                          global_rank, local_rank, gather_sizes,
+                                                                          num_batches, world,
+                                                                          use_full_preds=use_full_preds)
 
     if global_rank == 0:
-        print('Saving...')
-        assert len(top10_preds) == len(test_dataset), f"Number of predictions is {len(top10_preds)}. Size of dataset is {len(test_dataset)}"
-        input_dict = {'h,r->t': {'t_pred_top10': top10_preds}}
-        evaluator.save_test_submission(input_dict=input_dict, dir_path=FLAGS.test_save_dir)
-        print(f'Results saved under {FLAGS.test_save_dir}')
+        if use_full_preds:
+            result_dict = compute_eval_stats(full_preds.detach().cpu().numpy(),
+                                             correct_indices.detach().cpu().numpy(),
+                                             filter_mask=filter_mask.detach().cpu().numpy())
+            print('Test ' + ' '.join([f'{k}={result_dict[k]}' for k in result_dict.keys()]))
+        else:
+            print('Saving...')
+            assert len(top10_preds) == len(test_dataset), f"Number of predictions is {len(top10_preds)}. Size of dataset is {len(test_dataset)}"
+            input_dict = {'h,r->t': {'t_pred_top10': top10_preds}}
+            evaluator.save_test_submission(input_dict=input_dict, dir_path=FLAGS.test_save_dir)
+            print(f'Results saved under {FLAGS.test_save_dir}')
 
 
 def full_evaluation(eval_dataset: KGEvaluationDataset, eval_dataloader: DataLoader, model, global_rank: int,
@@ -450,6 +460,7 @@ def gather_results(data: torch.Tensor, global_rank, local_rank, gather_sizes, wo
 
 
 def main(argv):
+    # torch.multiprocessing.set_sharing_strategy('file_system')
     if FLAGS.distributed:
         grank = int(os.environ['RANK'])
         ws = int(os.environ['WORLD_SIZE'])
