@@ -155,7 +155,7 @@ def train(global_rank, local_rank, world):
             opt.step()
             # scheduler.step()
 
-            if (i + 1) % FLAGS.print_freq == 0:
+            if (FLAGS.print_freq > 0 and (i + 1) % FLAGS.print_freq == 0) or ((i + 1) == len(train_loader)):
                 dist.all_reduce(moving_average_loss, group=world)
                 moving_average_loss /= dist.get_world_size()
 
