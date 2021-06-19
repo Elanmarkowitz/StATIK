@@ -155,7 +155,7 @@ def train(global_rank, local_rank, world):
             opt.step()
             # scheduler.step()
 
-            if (i + 1) % FLAGS.print_freq == 0:
+            if (FLAGS.print_freq > 0 and (i + 1) % FLAGS.print_freq == 0) or (epoch + 1 == len(train_loader)):
                 dist.all_reduce(moving_average_loss, group=world)
                 moving_average_loss /= dist.get_world_size()
 
@@ -163,7 +163,7 @@ def train(global_rank, local_rank, world):
                     print(f"Iteration={i}/{len(train_loader)}, "
                           f"Moving Avg Loss={moving_average_loss.cpu().numpy():.5f}")
 
-        if (FLAGS.validate_every > 0 and (epoch + 1) % FLAGS.validate_every == 0) or ((epoch + 1) == len(train_loader)):
+        if (epoch + 1) % FLAGS.validate_every == 0:
             ddp_model.eval()
             gather_sizes = [FLAGS.valid_batch_size * FLAGS.validation_batches] * world.size()
             result = validate(valid_dataset, valid_dataloader, ddp_model, global_rank, local_rank, gather_sizes, num_batches=FLAGS.validation_batches,
