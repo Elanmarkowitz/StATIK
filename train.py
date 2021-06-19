@@ -393,6 +393,7 @@ def validate(valid_dataset: KGValidationDataset, valid_dataloader: DataLoader, m
             pickle.dump(stats_dict_thresholds, open("analysis_thresholds.pkl", "wb"))
 
         if use_full_preds:
+            filter_mask[:, valid_dataset.ds.test_entities] = -1
             result_dict = compute_eval_stats(full_preds.detach().cpu().numpy(),
                                              correct_indices.detach().cpu().numpy(),
                                              filter_mask=filter_mask.detach().cpu().numpy())
@@ -416,6 +417,7 @@ def test(test_dataset: KGTestDataset, test_dataloader: DataLoader, model, global
 
     if global_rank == 0:
         if use_full_preds:
+            filter_mask[:, test_dataset.ds.validation_entities] = -1
             result_dict = compute_eval_stats(full_preds.detach().cpu().numpy(),
                                              correct_indices.detach().cpu().numpy(),
                                              filter_mask=filter_mask.detach().cpu().numpy())
