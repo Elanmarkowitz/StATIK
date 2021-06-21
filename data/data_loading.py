@@ -38,13 +38,24 @@ class KGProcessedDataset(Dataset):
         self.valid_dict = dataset.valid_dict
         self.test_dict = dataset.test_dict
         self.access_to_full_graph = False
+        self.training_entities = np.unique(self.train_ht)
         if hasattr(dataset, 'valid_edge_lccsr'):
             self.access_to_full_graph = True
             self.valid_edge_lccsr = dataset.valid_edge_lccsr
             self.valid_relation_lccsr = dataset.valid_relation_lccsr
             self.test_edge_lccsr = dataset.test_edge_lccsr
             self.test_relation_lccsr = dataset.test_relation_lccsr
-        self.training_entities = np.unique(self.train_ht)
+            entities = np.zeros((self.num_entities,), dtype=np.int32)
+            validation_entities = np.unique(dataset.valid_hrt[:, [0, 2]])
+            entities[validation_entities] = 1
+            entities[self.training_entities] = 0
+            self.validation_entities = np.nonzero(entities)[0]
+            entities = np.zeros((self.num_entities,), dtype=np.int32)
+            test_entities = np.unique(dataset.test_hrt[:, [0, 2]])
+            entities[test_entities] = 1
+            entities[self.training_entities] = 0
+            entities[self.validation_entities] = 0
+            self.test_entities = np.nonzero(entities)[0]
 
     @staticmethod
     def init_post_processing(processed_dataset):
