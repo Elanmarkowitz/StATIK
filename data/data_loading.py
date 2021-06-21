@@ -324,7 +324,7 @@ class KGEvaluationDataset(Dataset):
                     subbatch = hrt_collate(list(zip(batch_h, batch_r, subbatch_t_candidates)))
                     if self.head_prediction:  # reverse for when doing head prediction
                         ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = subbatch
-                        ht_tensor = ht_tensor[:, [1, 0]]
+                        ht_tensor[queries.bool()] = ht_tensor[queries.bool()][:, [1, 0]]
                         h_or_t_sample = torch.where(h_or_t_sample == 0, 1, 0)
                         subbatch = ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
                     out_batches.append(subbatch)
