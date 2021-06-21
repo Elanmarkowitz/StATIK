@@ -325,7 +325,7 @@ class KGEvaluationDataset(Dataset):
                     if self.head_prediction:  # reverse for when doing head prediction
                         ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample = subbatch
                         ht_tensor[queries.bool()] = ht_tensor[queries.bool()][:, [1, 0]]
-                        h_or_t_sample = torch.where(h_or_t_sample == 0, 1, 0)
+                        h_or_t_sample[torch.logical_not(queries.bool())] = torch.where(h_or_t_sample[torch.logical_not(queries.bool())] == 0, 1, 0)
                         subbatch = ht_tensor, r_tensor, entity_set, entity_feat, indeg_feat, outdeg_feat, queries, labels, r_queries, r_relatives, h_or_t_sample
                     out_batches.append(subbatch)
             else:
