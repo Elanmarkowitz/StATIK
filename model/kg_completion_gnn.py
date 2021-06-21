@@ -205,7 +205,7 @@ class KGCompletionGNN(nn.Module):
         self.relation_correlation_model = RelationCorrelationModel(num_relations, embed_dim)
 
         self.decoder = decoder
-        # self.classify_triple = TripleClassificationLayer(embed_dim)
+        self.classify_triple = TripleClassificationLayer(embed_dim)
         self.transE_decoder = TransEDecoder(num_relations, embed_dim)
         # self.conv_decoder = ConvolutionDecoder(embed_dim)
 
@@ -228,7 +228,7 @@ class KGCompletionGNN(nn.Module):
         E = E_0 + r_direction_embed + h_or_t_sample_embed
 
         for i in range(self.num_layers):
-            H = self.message_passing_layers[i](H, E, ht, queries)
+            H = self.dropout(self.message_passing_layers[i](H, E, ht, queries))
             E = self.edge_update_layers[i](H, E, ht)
 
         if self.decoder == "MLP":

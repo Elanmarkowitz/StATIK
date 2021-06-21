@@ -114,11 +114,10 @@ def train(global_rank, local_rank, world):
                                            sampler=valid_sampler_head,
                                            drop_last=True, collate_fn=valid_dataset_head.get_eval_collate_fn(max_neighbors=FLAGS.samples_per_node))
 
-
     if FLAGS.checkpoint is not None:
         model = load_model(os.path.join(CHECKPOINT_DIR, FLAGS.checkpoint), ignore_state_dict=(global_rank != 0))
     else:
-        model = KGCompletionGNN(dataset.relation_feat, dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, decoder=FLAGS.decoder)
+        model = KGCompletionGNN(dataset.relation_feat, dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim, FLAGS.layers, decoder=FLAGS.decoder, dropout=FLAGS.dropout)
 
     model.to(local_rank)
 
@@ -153,7 +152,7 @@ def train(global_rank, local_rank, world):
             opt.zero_grad()
             loss.backward()
             opt.step()
-            # scheduler.step()
+            scheduler.step()
 
             if (FLAGS.print_freq > 0 and (i + 1) % FLAGS.print_freq == 0) or ((i + 1) == len(train_loader)):
                 dist.all_reduce(moving_average_loss, group=world)
@@ -172,13 +171,12 @@ def train(global_rank, local_rank, world):
                 result2 = validate(valid_dataset_head, valid_dataloader_head, ddp_model, global_rank, local_rank,
                                    gather_sizes, num_batches=FLAGS.validation_batches, world=world)
                 if global_rank == 0:
-                    result['mrr'] = 0.5*result['mrr'] + 0.5*result2['mrr']
+                    result['mrr'] = 0.5 * result['mrr'] + 0.5 * result2['mrr']
             if global_rank == 0:
                 mrr = result['mrr']
                 if mrr > max_mrr:
                     max_mrr = mrr
                     save_model(ddp_model.module, os.path.join(CHECKPOINT_DIR, f'{FLAGS.name}_best_model.pkl'))
-
 
                 print('Current MRR = {}, Best MRR = {}'.format(mrr, max_mrr))
 
