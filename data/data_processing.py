@@ -179,7 +179,7 @@ def process_data(root_data_dir: str, dataset_name: str) -> None:
         num_test = dataset.test_hrt[:, [0, 1]].shape[0]
         test_cand = np.tile(np.arange(0, dataset.num_entities), num_test)
         filtered_cand_t = get_filtered_candidate(dataset.test_hrt[:, [0, 1]], total, dataset.num_entities)
-        filtered_cand_h = get_filtered_candidate(dataset.test_hrt[:, [2, 1]][:,[2,1,0]], total, dataset.num_entities)
+        filtered_cand_h = get_filtered_candidate(dataset.test_hrt[:, [2, 1]], total[:,[2,1,0]], dataset.num_entities)
         test_dict = {'h,r->t': {
             'hr': dataset.test_hrt[:, [0, 1]],
             't_candidate': test_cand.reshape((num_test, dataset.num_entities)),
