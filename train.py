@@ -167,10 +167,14 @@ def train(global_rank, local_rank, world):
             gather_sizes = [FLAGS.valid_batch_size * FLAGS.validation_batches] * world.size()
             result = validate(valid_dataset, valid_dataloader, ddp_model, global_rank, local_rank, gather_sizes, num_batches=FLAGS.validation_batches,
                               world=world)
+            mrr_head = ""
+            mrr_tail = ""
             if FLAGS.predict_heads:
                 result2 = validate(valid_dataset_head, valid_dataloader_head, ddp_model, global_rank, local_rank,
                                    gather_sizes, num_batches=FLAGS.validation_batches, world=world)
                 if global_rank == 0:
+                    mrr_tail = result['mrr']
+                    mrr_head = result2['mrr']
                     result['mrr'] = 0.5 * result['mrr'] + 0.5 * result2['mrr']
             if global_rank == 0:
                 mrr = result['mrr']
@@ -178,7 +182,7 @@ def train(global_rank, local_rank, world):
                     max_mrr = mrr
                     save_model(ddp_model.module, os.path.join(CHECKPOINT_DIR, f'{FLAGS.name}_best_model.pkl'))
 
-                print('Current MRR = {}, Best MRR = {}'.format(mrr, max_mrr))
+                print('Current MRR = {}, t_pred MRR = {}, h_pred MRR = {}, Best MRR = {}'.format(mrr, mrr_tail, mrr_head, max_mrr))
 
         if global_rank == 0:
             save_checkpoint(ddp_model.module, epoch + 1, opt, scheduler, os.path.join(CHECKPOINT_DIR, f"{FLAGS.name}_e{epoch}.pkl"))
