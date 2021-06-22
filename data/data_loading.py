@@ -80,7 +80,7 @@ class KGProcessedDataset(Dataset):
         if mode == "train" or not self.access_to_full_graph:
             edge_lccsr = self.edge_lccsr
             relation_lccsr = self.relation_lccsr
-        elif mode == "valid":
+        elif mode == "validhead" or mode == "validtail":
             edge_lccsr = self.valid_edge_lccsr
             relation_lccsr = self.valid_relation_lccsr
         else:  # mode == "test"
@@ -209,8 +209,12 @@ class KGProcessedDataset(Dataset):
 
                     rels_t, tails_t = self.sample_neighbors(_t, max_neighbors, mode=mode)
 
-                    rels_h_t, tails_h_t = self.ignore_query(rels_h, tails_h, _r, _t)
-                    rels_t, tails_t = self.ignore_query(rels_t, tails_t, _r + self.num_relations, _h)
+                    if mode == "validhead" or mode == "testhead":
+                        rels_h_t, tails_h_t = self.ignore_query(rels_h, tails_h, _r + self.num_relations, _t)
+                        rels_t, tails_t = self.ignore_query(rels_t, tails_t, _r, _h)
+                    else:
+                        rels_h_t, tails_h_t = self.ignore_query(rels_h, tails_h, _r, _t)
+                        rels_t, tails_t = self.ignore_query(rels_t, tails_t, _r + self.num_relations, _h)
 
                     component, c_size = self.create_component(_h, rels_h_t, tails_h_t, _t, rels_t, tails_t, _r, _label)
 
@@ -302,6 +306,7 @@ class KGEvaluationDataset(Dataset):
     def get_eval_collate_fn(self, max_neighbors=10):
         def collate_fn(batch):
             mode = "valid" if isinstance(self, KGValidationDataset) else "test"
+            mode += "head" if self.head_prediction else "tail"
             hrt_collate = self.ds.get_collate_fn(max_neighbors=max_neighbors, mode=mode)
             batch_h = array("i")
             batch_r = array("i")
