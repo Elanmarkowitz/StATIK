@@ -8,6 +8,7 @@ import pickle
 from collections import defaultdict
 import json
 from sentence_transformers import SentenceTransformer
+from transformers import BertTokenizer, BertModel, FeatureExtractionPipeline
 
 import urllib.request
 
@@ -71,9 +72,27 @@ class ProcessWordNet(object):
         triples = pd.read_csv(os.path.join(self.data_dir, filename), names=['h', 'r', 't'], sep='\t')
         return triples
 
+    @staticmethod
+    def get_first_meaningful_sentence(desc):
+        sentences = desc.split('.')
+        cumulative_words = 0
+        for i in range(len(sentences)):
+            cumulative_words += len(sentences[0].split(' '))
+            if cumulative_words > 5:
+                return '.'.join(sentences[:i + 1])
+        return desc
+
+    @staticmethod
+    def get_first_n_words(desc, n=32):
+        words = desc.split(' ')
+        return ' '.join(words[:n])
+
     def read_descriptions(self):
+
         ent_desc = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['ent_desc']), names=['code', 'description'], sep='\t')
+        ent_desc['description'] = ent_desc['description'].apply(ProcessWordNet.get_first_n_words)
         rel_desc = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['rel_desc']), names=['code', 'description'], sep='\t')
+        rel_desc['description'] = rel_desc['description'].apply(ProcessWordNet.get_first_n_words)
         return ent_desc, rel_desc
 
     def write_to_npy(self, np_array, filename):
@@ -143,6 +162,7 @@ class ProcessWordNet(object):
         # self.entity2id = defaultdict(int)
         # for idx, wn_id in enumerate(self.entity_descs['code'].values):
         #     self.entity2id[wn_id] = idx
+
         self.entity2id = defaultdict(int)
         train_ent = set(self.train_hrt['h'].values)
         train_ent.update(set(self.train_hrt['t'].values))
@@ -176,9 +196,16 @@ class ProcessWordNet(object):
 
     def get_entity_features(self):
         print('Creating features using language model.')
-        model = SentenceTransformer('stsb-distilroberta-base-v2')
-        self.entity_feat = model.encode(self.entity_descs['description'].values)
-        self.relation_feat = model.encode(self.relation_descs['description'].values)
+        if self.dataset_info['dataset'] == 'FB15k-237':
+            tokenizer = BertTokenizer.from_pretrained('bert-base-cased')
+            model = BertModel.from_pretrained('bert-base-cased')
+            pipeline = FeatureExtractionPipeline(model, tokenizer, device=0)
+            self.entity_feat = np.array([np.array(pipeline(e))[0,0,:].flatten() for e in self.entity_descs['description'].values])
+            self.relation_feat = np.array([np.array(pipeline(e))[0,0,:].flatten() for e in self.relation_descs['description'].values])
+        else:
+            model = SentenceTransformer('stsb-distilroberta-base-v2')
+            self.entity_feat = model.encode(self.entity_descs['description'].values)
+            self.relation_feat = model.encode(self.relation_descs['description'].values)
 
     @staticmethod
     def replace_hrt(hrt: pd.DataFrame, map_dict):
