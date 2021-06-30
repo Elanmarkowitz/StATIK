@@ -2,9 +2,8 @@
 import numpy as np
 
 
-def compute_eval_stats(scores: np.ndarray, correct_indices: np.ndarray, filter_mask: np.ndarray = None):
-    filter_mask = filter_mask != -1  # TODO: Change this in data processing (0 means filter, 1 means use)
-    better_than_correct_indices = scores > scores[np.arange(scores.shape[0]), correct_indices].reshape(-1, 1)
+def compute_eval_stats(pos_scores: np.ndarray, target_scores: np.ndarray, filter_mask: np.ndarray = None):
+    better_than_correct_indices = target_scores > pos_scores.reshape(-1, 1)
     if filter_mask is not None:
         better_than_correct_indices = np.logical_and(better_than_correct_indices, filter_mask)
     rank = 1 + better_than_correct_indices.sum(1)

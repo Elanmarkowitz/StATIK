@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import math
 from torch import nn
 from torch import Tensor
+from transformers import BertModel
 
 
 class MessageCalculationLayer(nn.Module):
@@ -13,12 +14,11 @@ class MessageCalculationLayer(nn.Module):
         self.embed_dim = embed_dim
         self.transform_message = nn.Linear(2 * embed_dim, embed_dim)
 
-    def forward(self, H: Tensor, E: Tensor, heads: Tensor, queries: Tensor):
+    def forward(self, H: Tensor, E: Tensor, heads: Tensor):
         """
         :param H: shape n x embed_dim
         :param E: shape m x embed_dim
         :param heads: shape m x 1
-        :param r_embed: shape m x embed_dim
         :return:
             processed messages for nodes. shape nodes_in_batch x embed_dim
         """
@@ -56,20 +56,19 @@ class MessagePassingLayer(nn.Module):
         num_msgs = torch.zeros((nodes_in_batch,), dtype=torch.float, device=device)
         unique, counts = msg_dst.unique(return_counts=True)
         num_msgs[unique] = counts.float()
-        agg_messages = agg_messages / num_msgs.reshape(-1, 1)  # take mean of messages
+        agg_messages = agg_messages / (num_msgs.reshape(-1, 1) + 1e-7)  # take mean of messages
 
         return agg_messages
 
-    def forward(self, H: Tensor, E: Tensor, ht: Tensor, queries):
+    def forward(self, H: Tensor, E: Tensor, ht: Tensor):
         """
         :param H: shape n x embed_dim
         :param E: shape m x embed_dim
         :param ht: shape m x 2
-        :param r_embed: shape m x embed_dim
         :return:
         """
-        messages_fwd = self.calc_messages_fwd(H, E, ht[:, 0], queries)
-        messages_back = self.calc_messages_back(H, E, ht[:, 1], queries)
+        messages_fwd = self.calc_messages_fwd(H, E, ht[:, 0])
+        messages_back = self.calc_messages_back(H, E, ht[:, 1])
         aggregated_messages = self.aggregate_messages(ht, messages_fwd, messages_back, H.shape[0])
         out = self.norm(self.act(aggregated_messages) + H)
         return out
@@ -180,6 +179,9 @@ class KGCompletionGNN(nn.Module):
         self.num_layers = num_layers
         self.norm = norm
         self.dropout = nn.Dropout(p=dropout)
+        self._encode_only = False
+
+        self.language_transformer = BertModel.from_pretrained('bert-base-cased')
 
         self.relation_embedding = nn.Embedding(num_relations, input_dim)
         if relation_feat is not None:
@@ -212,8 +214,40 @@ class KGCompletionGNN(nn.Module):
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
 
-    def forward(self, ht: Tensor, r_tensor: Tensor, r_query: Tensor, entity_feat: Tensor, r_relative, h_or_t_sample, queries: Tensor):
+    def encode_only(self, val: bool):
+        self._encode_only = val
+        return self
+
+    def forward(self, input_ids: Tensor, token_type_ids: Tensor, attention_mask: Tensor, ht: Tensor,
+                r_tensor: Tensor, r_query: Tensor, entity_feat: Tensor, query_nodes: Tensor, r_relative: Tensor,
+                is_head_prediction: Tensor, queries=None, negative_targets=None, positive_targets=None, target_embeddings=None):
+        """
+
+        :param input_ids: For BERT
+        :param token_type_ids: For BERT
+        :param attention_mask: For BERT
+        :param ht: edges in the message passing subgraphs
+        :param r_tensor: relation types in the message passing subgraphs
+        :param r_query: relation type of the query
+        :param entity_feat: features of the entities in the message passing subgraphs
+        :param query_nodes: the centroid nodes of each subgraph, entity associated with either being a target or a
+                            query, not a sampled neighbor
+        :param r_relative: direction of the edge in the subgraph relative to the query_node
+        :param is_head_prediction: for each query, indicates whether it is a head prediction task
+        :param queries: boolean indicating which query_nodes are part of a query (vs target)
+        :param negative_targets: boolean indicating which query_nodes are negative targets
+        :param positive_targets: boolean indicating which query_nodes are positive targets
+        :param target_embeddings: for inference, pass a (N x d) tensor of target embeddings
+        :return:
+        """
         # Transform entities
+        language_embedding = self.language_transformer(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask)[1]
+
+        new_entity_feat = entity_feat
+        try:
+            new_entity_feat[query_nodes] = language_embedding
+        except IndexError:
+            breakpoint()
 
         H_0 = self.act(self.entity_input_transform(self.dropout(entity_feat)))
         H_0 = self.norm_entity(H_0)
@@ -222,47 +256,34 @@ class KGCompletionGNN(nn.Module):
         # Transform relations
         r_embed = self.relation_embedding(r_tensor)
         r_direction_embed = self.relative_direction_embedding(r_relative)
-        h_or_t_sample_embed = self.head_or_tail_edge_embedding(h_or_t_sample)
         E_0 = self.act(self.edge_input_transform(r_embed))
         E_0 = self.norm_edge(E_0)
-        E = E_0 + r_direction_embed + h_or_t_sample_embed
+        E = E_0 + r_direction_embed
 
         for i in range(self.num_layers):
-            H = self.dropout(self.message_passing_layers[i](H, E, ht, queries))
+            H = self.dropout(self.message_passing_layers[i](H, E, ht))
             E = self.edge_update_layers[i](H, E, ht)
 
-        if self.decoder == "MLP":
-            out = self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
-        elif self.decoder == "TransE":
-            out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
-        elif self.decoder == "MLP+TransE":
-            if self.training:
-                mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
-                transe_out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
-                out = (mlp_out.flatten(), transe_out)
-            else:
-                out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
-        elif self.decoder == "MLP+Conv":
-            if self.training:
-                mlp_out = self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
-                conv_out = self.conv_decoder(H, E, ht, queries)
-                out = (mlp_out.flatten(), conv_out)
-            else:
-                out = self.conv_decoder(H, E, ht, queries)
-        elif self.decoder == "RelCorr+TransE":
-            rel_corr_score = self.relation_correlation_model(ht, r_query, r_tensor, r_relative, h_or_t_sample, queries,
-                                                             entity_feat.shape[0])
-            transe_out = -1 * self.transE_decoder(H, r_tensor, ht, queries)
-            out = rel_corr_score.flatten() + transe_out
-        elif self.decoder == "RelCorr+MLP":
-            rel_corr_score = self.relation_correlation_model(ht, r_query, r_tensor, r_relative, h_or_t_sample, queries,
-                                                             entity_feat.shape[0])
-            out = rel_corr_score.flatten() + self.classify_triple(H, E, H_0, E_0, ht, queries).flatten()
-        else:
-            out = None
-            Exception('Decoder not valid.')
+        final_embeddings = H[query_nodes]  # TODO: look at pooling of message passing
 
-        return out
+        if self._encode_only:
+            return final_embeddings
+
+        if self.training:
+            query_embeds = final_embeddings[queries]
+            positive_target_embeds = final_embeddings[positive_targets]
+            negative_target_embeds = final_embeddings[negative_targets]
+        else:
+            query_embeds = final_embeddings[queries]
+            positive_target_embeds = final_embeddings[torch.logical_not(queries)]
+            negative_target_embeds = target_embeddings
+
+        if self.decoder == "TransE":
+            pos_scores, neg_scores = self.transE_decoder(query_embeds, positive_target_embeds, negative_target_embeds, r_query, is_head_prediction)
+        else:
+            raise Exception(f"Decoder '{self.decoder}' not valid.")
+
+        return pos_scores, neg_scores
 
     def get_loss_fn(self, margin=1.0):
         if self.decoder == "MLP":
@@ -285,23 +306,18 @@ class KGCompletionGNN(nn.Module):
         else:
             Exception(f"Loss function not known for {self.decoder}")
 
-    def margin_ranking_loss(self, scores, labels):
-        distances = -1 * scores
-        positives = labels.nonzero(as_tuple=False).flatten()
-        negatives = (labels == 0).nonzero(as_tuple=False).flatten()
+    def margin_ranking_loss(self, pos_scores, neg_scores):
+        """
+        :param pos_scores: (num_pos,)
+        :param neg_scores: (num_pos, num_neg)
+        :return:
+        """
+        pos_scores = pos_scores.reshape(-1, 1).expand(-1, neg_scores.shape[1])
 
-        pos_distances = distances[positives]
-        neg_distances = distances[negatives]
+        target = torch.tensor([1], dtype=torch.long, device=pos_scores.device)
+        return F.margin_ranking_loss(pos_scores, neg_scores, target, margin=self.margin)
 
-        negs_per_pos = neg_distances.shape[0] // pos_distances.shape[0]
-
-        neg_distances = neg_distances.reshape(-1, negs_per_pos)
-        pos_distances = pos_distances.reshape(-1, 1).expand(-1, negs_per_pos)
-
-        target = torch.tensor([-1], dtype=torch.long, device=scores.device)
-        return F.margin_ranking_loss(pos_distances, neg_distances, target, margin=self.margin)
-
-    def combo_loss(self, scores, labels):
+    def combo_loss(self, pos_scores, neg_scores):
         mlp_scores = scores[0]
         transe_scores = scores[1]
         bce_loss = F.binary_cross_entropy_with_logits(mlp_scores, labels)
@@ -316,24 +332,53 @@ class TransEDecoder(nn.Module):
         self.relation_vector = nn.Embedding(num_relations, embed_dim)
         self.relation_vector.weight.data.uniform_(-6 / math.sqrt(embed_dim), 6 / math.sqrt(embed_dim))
 
-    def forward(self, H, r_tensor, ht, queries):
-        query_idxs = queries.nonzero().flatten()
-        ht_q = ht[query_idxs]
-        r_q = r_tensor[query_idxs]
+    def forward(self, query_embeds, pos_target_embeds, neg_target_embeds, r_type, is_head_prediction):
+        """
 
-        head_embeds = H[ht_q[:, 0]]
-        relation_embeds = self.relation_vector(r_q)
-        tail_embeds = H[ht_q[:, 1]]
+        :param query_embeds: (Q,d)
+        :param pos_target_embeds: (Q,d)
+        :param neg_target_embeds: (num_negs,d)
+        :param r_type: (Q,)
+        :param is_head_prediction: (Q,) whether the query is associated with a head prediction task (hr->?) vs (tr->?)
+        :return:
+        """
+        relation_embeds = self.relation_vector(r_type)
 
-        distances = self.distance(head_embeds, relation_embeds, tail_embeds, self.distance_norm)
+        head_embeds = torch.where(is_head_prediction.reshape(-1,1), pos_target_embeds, query_embeds)
+        tail_embeds = torch.where(is_head_prediction.reshape(-1,1), query_embeds, pos_target_embeds)
 
-        return distances
+        pos_distances = self.distance(head_embeds, relation_embeds, tail_embeds, self.distance_norm)
+
+        neg_target_embeds = neg_target_embeds.reshape(1, -1, neg_target_embeds.shape[1])  # 1 x num negs x d
+        query_embeds = query_embeds.reshape(-1, 1, query_embeds.shape[1])  # num queries x 1 x d
+        relation_embeds = relation_embeds.reshape(-1, 1, relation_embeds.shape[1])  # num queries x 1 x d
+
+        bkw_query_embeds = query_embeds[is_head_prediction]
+        bkw_target_embeds = neg_target_embeds
+        bkw_relation_embeds = relation_embeds[is_head_prediction]
+
+        head_pred_distances = self.distance(bkw_target_embeds, bkw_relation_embeds, bkw_query_embeds, self.distance_norm)
+
+        fwd_query_embeds = query_embeds[torch.logical_not(is_head_prediction)]
+        fwd_target_embeds = neg_target_embeds
+        fwd_relation_embeds = relation_embeds[torch.logical_not(is_head_prediction)]
+
+        tail_pred_distances = self.distance(fwd_query_embeds, fwd_relation_embeds, fwd_target_embeds, self.distance_norm)
+
+        neg_distances = torch.empty(query_embeds.shape[0], neg_target_embeds.shape[1], device=query_embeds.device)
+        neg_distances[is_head_prediction] = head_pred_distances
+        neg_distances[torch.logical_not(is_head_prediction)] = tail_pred_distances
+
+        if torch.any(torch.isnan(pos_distances)):
+            breakpoint()
+
+        return -1*pos_distances, -1*neg_distances
 
     @staticmethod
     def distance(head_embeds, relation_embeds, tail_embeds, p):
         head_embeds = F.normalize(head_embeds, p=2, dim=1)
         tail_embeds = F.normalize(tail_embeds, p=2, dim=1)
-        distances = torch.norm(head_embeds + relation_embeds - tail_embeds, p=p, dim=1)
+        distances = torch.norm(head_embeds + relation_embeds - tail_embeds, p=p, dim=-1)
         return distances
 
 
