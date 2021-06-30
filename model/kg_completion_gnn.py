@@ -243,11 +243,7 @@ class KGCompletionGNN(nn.Module):
         # Transform entities
         language_embedding = self.language_transformer(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask)[1]
 
-        new_entity_feat = entity_feat
-        try:
-            new_entity_feat[query_nodes] = language_embedding
-        except IndexError:
-            breakpoint()
+        entity_feat[query_nodes] = language_embedding
 
         H_0 = self.act(self.entity_input_transform(self.dropout(entity_feat)))
         H_0 = self.norm_entity(H_0)

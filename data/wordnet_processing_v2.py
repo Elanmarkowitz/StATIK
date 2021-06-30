@@ -40,6 +40,8 @@ class ProcessWordNet(object):
         self.relation_descs = None
         self.entity2id = None
         self.relation2id = None
+        self.entity_text = None
+        self.relation_text = None
 
         self.dataset_info = DATASET_INFO if dataset_info is None else dataset_info
         if root_data_dir is None:
@@ -90,9 +92,7 @@ class ProcessWordNet(object):
     def read_descriptions(self):
 
         ent_desc = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['ent_desc']), names=['code', 'description'], sep='\t')
-        ent_desc['description'] = ent_desc['description'].apply(ProcessWordNet.get_first_n_words)
         rel_desc = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['rel_desc']), names=['code', 'description'], sep='\t')
-        rel_desc['description'] = rel_desc['description'].apply(ProcessWordNet.get_first_n_words)
         return ent_desc, rel_desc
 
     def write_to_npy(self, np_array, filename):
@@ -108,6 +108,8 @@ class ProcessWordNet(object):
             os.mkdir(os.path.join(self.data_dir, 'processed'))
 
         self.entity_descs, self.relation_descs = self.read_descriptions()
+        self.entity_text = self.entity_descs['description'].values
+        self.relation_text = self.relation_descs['description'].values
         self.get_entity_features()
         self.write_to_npy(self.entity_feat, 'entity_features.npy')
         self.write_to_npy(self.relation_feat, 'relation_features.npy')
@@ -158,6 +160,10 @@ class ProcessWordNet(object):
         self.entity_feat = self.load_from_npy('entity_features.npy')
         self.relation_feat = self.load_from_npy('relation_features.npy')
 
+        entity_descs, relation_descs = self.read_descriptions()
+        self.entity_text = entity_descs['description'].values
+        self.relation_text = relation_descs['description'].values
+
     def create_symbols_to_id(self):
         # self.entity2id = defaultdict(int)
         # for idx, wn_id in enumerate(self.entity_descs['code'].values):
@@ -196,16 +202,18 @@ class ProcessWordNet(object):
 
     def get_entity_features(self):
         print('Creating features using language model.')
-        if self.dataset_info['dataset'] == 'FB15k-237':
-            tokenizer = BertTokenizer.from_pretrained('bert-base-cased')
-            model = BertModel.from_pretrained('bert-base-cased')
-            pipeline = FeatureExtractionPipeline(model, tokenizer, device=0)
-            self.entity_feat = np.array([np.array(pipeline(e))[0,0,:].flatten() for e in self.entity_descs['description'].values])
-            self.relation_feat = np.array([np.array(pipeline(e))[0,0,:].flatten() for e in self.relation_descs['description'].values])
-        else:
-            model = SentenceTransformer('stsb-distilroberta-base-v2')
-            self.entity_feat = model.encode(self.entity_descs['description'].values)
-            self.relation_feat = model.encode(self.relation_descs['description'].values)
+        # if self.dataset_info['dataset'] == 'FB15k-237':
+        #     tokenizer = BertTokenizer.from_pretrained('bert-base-cased')
+        #     model = BertModel.from_pretrained('bert-base-cased')
+        #     pipeline = FeatureExtractionPipeline(model, tokenizer, device=0)
+        #     self.entity_feat = np.array([np.array(pipeline(e))[0,0,:].flatten()
+        #                                  for e in self.entity_descs['description'].apply(ProcessWordNet.get_first_n_words).values])
+        #     self.relation_feat = np.array([np.array(pipeline(e))[0,0,:].flatten()
+        #                                    for e in self.relation_descs['description'].apply(ProcessWordNet.get_first_n_words).values])
+        # else:
+        model = SentenceTransformer('stsb-distilroberta-base-v2')
+        self.entity_feat = model.encode(self.entity_descs['description'].apply(ProcessWordNet.get_first_n_words).values)
+        self.relation_feat = model.encode(self.relation_descs['description'].apply(ProcessWordNet.get_first_n_words).values)
 
     @staticmethod
     def replace_hrt(hrt: pd.DataFrame, map_dict):
