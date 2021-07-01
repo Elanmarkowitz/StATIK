@@ -372,8 +372,8 @@ class TransEDecoder(nn.Module):
 
     @staticmethod
     def distance(head_embeds, relation_embeds, tail_embeds, p):
-        head_embeds = F.normalize(head_embeds, p=2, dim=1)
-        tail_embeds = F.normalize(tail_embeds, p=2, dim=1)
+        head_embeds = F.normalize(head_embeds, p=2, dim=-1)
+        tail_embeds = F.normalize(tail_embeds, p=2, dim=-1)
         distances = torch.norm(head_embeds + relation_embeds - tail_embeds, p=p, dim=-1)
         return distances
 

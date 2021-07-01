@@ -222,12 +222,12 @@ class TrainingCollateFunction:
         to_tokenizer = []
 
         # Add queries
-        to_tokenizer += [(h, r, t, False, True) for h, r, t in batch]
-        to_tokenizer += [(h, r, t, True, True) for h, r, t in batch]
+        to_tokenizer += [(h, r, t, False, True) for h, r, t in batch]  # tail prediction
+        to_tokenizer += [(h, r, t, True, True) for h, r, t in batch]  # head prediction
 
         # Add positive targets
-        to_tokenizer += [(h, r, t, False, False) for h, r, t in batch]
-        to_tokenizer += [(h, r, t, True, False) for h, r, t in batch]
+        to_tokenizer += [(h, r, t, False, False) for h, r, t in batch]  # tail prediction
+        to_tokenizer += [(h, r, t, True, False) for h, r, t in batch]  # head prediction
 
         if negatives is not None:
             to_tokenizer += [(-1, -1, n, False, False) for n in negatives]
