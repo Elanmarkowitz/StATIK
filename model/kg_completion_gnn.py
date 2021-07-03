@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import math
 from torch import nn
 from torch import Tensor
-from transformers import BertModel
+from transformers import BertModel, DistilBertModel, DistilBertForSequenceClassification
 
 
 class MessageCalculationLayer(nn.Module):
@@ -78,24 +78,44 @@ class TripleClassificationLayer(nn.Module):
     def __init__(self, embed_dim: int):
         super(TripleClassificationLayer, self).__init__()
         self.embed_dim = embed_dim
-        self.layer1 = nn.Linear(6 * embed_dim, embed_dim)
+        self.layer1 = nn.Linear(4 * embed_dim, embed_dim)
         self.layer2 = nn.Linear(embed_dim, 1)
         self.act = nn.LeakyReLU()
 
-    def forward(self, H: Tensor, E: Tensor, H_0: Tensor, E_0: Tensor, ht: Tensor, queries: Tensor):
-        query_indices = queries.nonzero().flatten()
-        E_q = E[query_indices]
-        E_0_q = E_0[query_indices]
-        ht_q = ht[query_indices]
-        H_head_q = H[ht_q[:, 0]]
-        H_tail_q = H[ht_q[:, 1]]
-        H_0_head_q = H_0[ht_q[:, 0]]
-        H_0_tail_q = H_0[ht_q[:, 1]]
-        out_1 = self.act(self.layer1(
-            torch.cat([E_q, E_0_q, H_head_q, H_0_head_q, H_tail_q, H_0_tail_q], dim=1)
-        ))
-        out = self.layer2(out_1)
-        return out
+    def forward(self, query_embeds: Tensor, pos_target_embeds: Tensor, neg_target_embeds: Tensor, r_type: Tensor,
+                is_head_prediction: Tensor):
+        """
+
+        :param query_embeds:
+        :param pos_target_embeds:
+        :param neg_target_embeds:
+        :param r_type:
+        :param is_head_prediction:
+        :return:
+        """
+        num_q = query_embeds.shape[0]
+        num_neg_t = neg_target_embeds.shape[0]
+        head_embeds, tail_embeds, bkw_target_embeds, bkw_query_embeds, fwd_query_embeds, fwd_target_embeds = query_target_to_head_tail(
+            query_embeds, pos_target_embeds, neg_target_embeds, is_head_prediction
+        )
+        pos_examples = torch.cat([head_embeds, tail_embeds, head_embeds - tail_embeds, head_embeds * tail_embeds], dim=-1)
+        fwd_query_embeds = fwd_query_embeds.expand(-1, num_neg_t, -1)
+        fwd_target_embeds = fwd_target_embeds.expand(num_q//2, -1, -1)
+        bkw_query_embeds = bkw_query_embeds.expand(-1, num_neg_t, -1)
+        bkw_target_embeds = bkw_target_embeds.expand(num_q//2, -1, -1)
+        neg_fwd_examples = torch.cat([fwd_query_embeds,
+                                      fwd_target_embeds,
+                                      fwd_query_embeds - fwd_target_embeds,
+                                      fwd_query_embeds * fwd_target_embeds], dim=-1)
+        neg_bkw_examples = torch.cat([bkw_query_embeds,
+                                      bkw_target_embeds,
+                                      bkw_query_embeds - bkw_target_embeds,
+                                      bkw_query_embeds * bkw_target_embeds], dim=-1)
+        pos_out = self.layer2(self.act(self.layer1(pos_examples)))
+        neg_fwd_out = self.layer2(self.act(self.layer1(neg_fwd_examples)))
+        neg_bkw_out = self.layer2(self.act(self.layer1(neg_bkw_examples)))
+        neg_out = torch.cat([neg_fwd_out, neg_bkw_out], dim=0)
+        return pos_out, neg_out
 
 
 class EdgeUpdateLayer(nn.Module):
@@ -241,7 +261,13 @@ class KGCompletionGNN(nn.Module):
         :return:
         """
         # Transform entities
-        language_embedding = self.language_transformer(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask)[1]
+        if type(self.language_transformer) in [BertModel]:
+            language_embedding = self.language_transformer(input_ids=input_ids, token_type_ids=token_type_ids,
+                                                           attention_mask=attention_mask)[1]
+        elif type(self.language_transformer) in [DistilBertModel, DistilBertForSequenceClassification]:  # use [CLS] embedding
+            language_embedding = self.language_transformer(input_ids=input_ids, attention_mask=attention_mask)[0][:, 0]
+        else:
+            raise Exception('Unknown language model type')
 
         entity_feat[query_nodes] = language_embedding
 
@@ -260,7 +286,7 @@ class KGCompletionGNN(nn.Module):
             H = self.dropout(self.message_passing_layers[i](H, E, ht))
             E = self.edge_update_layers[i](H, E, ht)
 
-        final_embeddings = H[query_nodes]  # TODO: look at pooling of message passing
+        final_embeddings = 0.5*H[query_nodes] + 0.5*H_0[query_nodes]  # TODO: look at pooling of message passing
 
         if self._encode_only:
             return final_embeddings
@@ -275,11 +301,21 @@ class KGCompletionGNN(nn.Module):
             negative_target_embeds = target_embeddings
 
         if self.decoder == "TransE":
-            pos_scores, neg_scores = self.transE_decoder(query_embeds, positive_target_embeds, negative_target_embeds, r_query, is_head_prediction)
+            pos_scores, neg_scores = self.transE_decoder(query_embeds, positive_target_embeds, negative_target_embeds,
+                                                         r_query, is_head_prediction)
+            return pos_scores, neg_scores
+        if self.decoder == "MLP+TransE":
+            transe_pos_scores, transe_neg_scores = self.transE_decoder(query_embeds, positive_target_embeds,
+                                                                       negative_target_embeds, r_query,
+                                                                       is_head_prediction)
+            if self.training:
+                mlp_pos_scores, mlp_neg_scores = self.classify_triple(query_embeds, positive_target_embeds,
+                                                                      negative_target_embeds, r_query, is_head_prediction)
+                return (transe_pos_scores, transe_neg_scores), (mlp_pos_scores, mlp_neg_scores)
+            else:
+                return transe_pos_scores, transe_neg_scores
         else:
             raise Exception(f"Decoder '{self.decoder}' not valid.")
-
-        return pos_scores, neg_scores
 
     def get_loss_fn(self, margin=1.0):
         if self.decoder == "MLP":
@@ -313,13 +349,34 @@ class KGCompletionGNN(nn.Module):
         target = torch.tensor([1], dtype=torch.long, device=pos_scores.device)
         return F.margin_ranking_loss(pos_scores, neg_scores, target, margin=self.margin)
 
-    def combo_loss(self, pos_scores, neg_scores):
-        mlp_scores = scores[0]
-        transe_scores = scores[1]
-        bce_loss = F.binary_cross_entropy_with_logits(mlp_scores, labels)
-        transe_loss = self.margin_ranking_loss(transe_scores, labels)
+    @staticmethod
+    def bce_with_logits(pos_scores, neg_scores):
+        pos_scores = pos_scores.flatten()
+        neg_scores = neg_scores.flatten()
+        labels = torch.cat([torch.ones_like(pos_scores), torch.zeros_like(neg_scores)])
+        scores = torch.cat([pos_scores, neg_scores])
+        return F.binary_cross_entropy_with_logits(scores, labels)
+
+    def combo_loss(self, transe_scores, mlp_scores):
+        bce_loss = self.bce_with_logits(mlp_scores[0], mlp_scores[1])
+        transe_loss = self.margin_ranking_loss(transe_scores[0], transe_scores[1])
         return transe_loss + 0.4 * bce_loss
 
+
+def query_target_to_head_tail(query_embeds: Tensor, pos_target_embeds: Tensor, neg_target_embeds: Tensor, is_head_prediction: Tensor):
+    head_embeds = torch.where(is_head_prediction.reshape(-1, 1), pos_target_embeds, query_embeds)
+    tail_embeds = torch.where(is_head_prediction.reshape(-1, 1), query_embeds, pos_target_embeds)
+
+    neg_target_embeds = neg_target_embeds.reshape(1, -1, neg_target_embeds.shape[1])  # 1 x num negs x d
+    query_embeds = query_embeds.reshape(-1, 1, query_embeds.shape[1])  # num queries x 1 x d
+
+    bkw_query_embeds = query_embeds[is_head_prediction]
+    bkw_target_embeds = neg_target_embeds
+
+    fwd_query_embeds = query_embeds[torch.logical_not(is_head_prediction)]
+    fwd_target_embeds = neg_target_embeds
+
+    return head_embeds, tail_embeds, bkw_target_embeds, bkw_query_embeds, fwd_query_embeds, fwd_target_embeds
 
 class TransEDecoder(nn.Module):
     def __init__(self, num_relations: int, embed_dim: int, distance_norm: int = 2):
@@ -340,28 +397,23 @@ class TransEDecoder(nn.Module):
         """
         relation_embeds = self.relation_vector(r_type)
 
-        head_embeds = torch.where(is_head_prediction.reshape(-1,1), pos_target_embeds, query_embeds)
-        tail_embeds = torch.where(is_head_prediction.reshape(-1,1), query_embeds, pos_target_embeds)
+        head_embeds, tail_embeds, bkw_target_embeds, bkw_query_embeds, fwd_query_embeds, fwd_target_embeds = query_target_to_head_tail(
+            query_embeds, pos_target_embeds, neg_target_embeds, is_head_prediction
+        )
 
         pos_distances = self.distance(head_embeds, relation_embeds, tail_embeds, self.distance_norm)
 
-        neg_target_embeds = neg_target_embeds.reshape(1, -1, neg_target_embeds.shape[1])  # 1 x num negs x d
-        query_embeds = query_embeds.reshape(-1, 1, query_embeds.shape[1])  # num queries x 1 x d
         relation_embeds = relation_embeds.reshape(-1, 1, relation_embeds.shape[1])  # num queries x 1 x d
 
-        bkw_query_embeds = query_embeds[is_head_prediction]
-        bkw_target_embeds = neg_target_embeds
         bkw_relation_embeds = relation_embeds[is_head_prediction]
 
         head_pred_distances = self.distance(bkw_target_embeds, bkw_relation_embeds, bkw_query_embeds, self.distance_norm)
 
-        fwd_query_embeds = query_embeds[torch.logical_not(is_head_prediction)]
-        fwd_target_embeds = neg_target_embeds
         fwd_relation_embeds = relation_embeds[torch.logical_not(is_head_prediction)]
 
         tail_pred_distances = self.distance(fwd_query_embeds, fwd_relation_embeds, fwd_target_embeds, self.distance_norm)
 
-        neg_distances = torch.empty(query_embeds.shape[0], neg_target_embeds.shape[1], device=query_embeds.device)
+        neg_distances = torch.empty(query_embeds.shape[0], neg_target_embeds.shape[0], device=query_embeds.device)
         neg_distances[is_head_prediction] = head_pred_distances
         neg_distances[torch.logical_not(is_head_prediction)] = tail_pred_distances
 

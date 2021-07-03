@@ -50,7 +50,7 @@ flags.DEFINE_integer("valid_batch_size", 1, "Batch size for validation (does all
 flags.DEFINE_integer("epochs", 1, "Num epochs to train for")
 flags.DEFINE_float("margin", 1.0, "Margin in transE loss")
 flags.DEFINE_string("decoder", "MLP+TransE", "Choose decoder from [MLP, TransE, MLP+TransE]")
-flags.DEFINE_float("dropout", 0.5, "Dropout on input features.")
+flags.DEFINE_float("dropout", 0.0, "Dropout on input features.")
 
 flags.DEFINE_bool('validation_only', False, 'Whether or not to do a complete inference run across the validation set')
 flags.DEFINE_bool('test_only', False, 'Whether or not to do a complete inference run across the test set')
@@ -108,23 +108,19 @@ def train(global_rank, local_rank, world):
                                                                  num_negatives=FLAGS.neg_samples))
 
     target_dataset = get_validation_dataset(dataset).target_mode()
-    target_sampler = DistributedSampler(target_dataset, rank=global_rank, shuffle=False)
+    target_subset = partition_dataset_by_rank(target_dataset, global_rank, world)
+    target_collate_fn = InferenceCollateTargetFunction(target_dataset, FLAGS.samples_per_node)
+    target_dataloader = DataLoader(target_subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
+                                   collate_fn=target_collate_fn)
+
     valid_dataset = get_validation_dataset(dataset).query_mode()
     valid_sampler = DistributedSampler(valid_dataset, rank=global_rank, shuffle=False)
+    valid_collate_fn_tail = InferenceCollateQueryFunction(valid_dataset, FLAGS.samples_per_node, head_prediction=False)
     valid_dataloader_tail = DataLoader(valid_dataset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
-                                       sampler=valid_sampler, drop_last=True,
-                                       collate_fn=InferenceCollateQueryFunction(valid_dataset,
-                                                                                max_neighbors=FLAGS.samples_per_node,
-                                                                                head_prediction=False))
+                                       sampler=valid_sampler, drop_last=True, collate_fn=valid_collate_fn_tail)
+    valid_collate_fn_head = InferenceCollateQueryFunction(valid_dataset, FLAGS.samples_per_node, head_prediction=True)
     valid_dataloader_head = DataLoader(valid_dataset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
-                                       sampler=valid_sampler, drop_last=True,
-                                       collate_fn=InferenceCollateQueryFunction(valid_dataset,
-                                                                                max_neighbors=FLAGS.samples_per_node,
-                                                                                head_prediction=True))
-    target_dataloader = DataLoader(target_dataset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
-                                   sampler=target_sampler, drop_last=True,
-                                   collate_fn=InferenceCollateTargetFunction(valid_dataset,
-                                                                             max_neighbors=FLAGS.samples_per_node))
+                                       sampler=valid_sampler, drop_last=True, collate_fn=valid_collate_fn_head)
     if FLAGS.checkpoint is not None:
         model = load_model(os.path.join(CHECKPOINT_DIR, FLAGS.checkpoint), ignore_state_dict=(global_rank != 0))
     else:
@@ -177,24 +173,24 @@ def train(global_rank, local_rank, world):
                     print(f"Iteration={i}/{len(train_loader)}, "
                           f"Moving Avg Loss={moving_average_loss.cpu().numpy():.5f}")
 
-            if (i + 1) % FLAGS.validate_every == 0:
-                ddp_model.eval()
-                eval_gather_sizes = calculate_gather_sizes(valid_dataset, world, FLAGS.validation_batches, FLAGS.valid_batch_size)
-                target_gather_sizes = calculate_gather_sizes(target_dataset, world)
-                result = validate(valid_dataset, valid_dataloader_tail, target_dataloader, ddp_model, global_rank,
-                                  local_rank, eval_gather_sizes, target_gather_sizes, num_batches=FLAGS.validation_batches, world=world)
-                result2 = validate(valid_dataset, valid_dataloader_head, target_dataloader, ddp_model, global_rank,
-                                   local_rank, eval_gather_sizes, target_gather_sizes, num_batches=FLAGS.validation_batches, world=world)
-                if global_rank == 0:
-                    mrr_tail = result['mrr']
-                    mrr_head = result2['mrr']
-                    result['mrr'] = 0.5 * result['mrr'] + 0.5 * result2['mrr']
-                    mrr = result['mrr']
-                    if mrr > max_mrr:
-                        max_mrr = mrr
-                        save_model(ddp_model.module, os.path.join(CHECKPOINT_DIR, f'{FLAGS.name}_best_model.pkl'))
+        if (epoch + 1) % FLAGS.validate_every == 0:
+            ddp_model.eval()
+            eval_gather_sizes = calculate_gather_sizes(valid_dataset, world, FLAGS.validation_batches, FLAGS.valid_batch_size)
+            target_gather_sizes = calculate_gather_sizes(target_dataset, world)
+            result = validate(valid_dataset, valid_dataloader_tail, target_dataloader, ddp_model, global_rank,
+                              local_rank, eval_gather_sizes, target_gather_sizes, num_batches=FLAGS.validation_batches, world=world)
+            result2 = validate(valid_dataset, valid_dataloader_head, target_dataloader, ddp_model, global_rank,
+                               local_rank, eval_gather_sizes, target_gather_sizes, num_batches=FLAGS.validation_batches, world=world)
+            if global_rank == 0:
+                mrr_tail = result['mrr']
+                mrr_head = result2['mrr']
+                result['mrr'] = 0.5 * result['mrr'] + 0.5 * result2['mrr']
+                mrr = result['mrr']
+                if mrr > max_mrr:
+                    max_mrr = mrr
+                    save_model(ddp_model.module, os.path.join(CHECKPOINT_DIR, f'{FLAGS.name}_best_model.pkl'))
 
-                    print('Current MRR = {}, t_pred MRR = {}, h_pred MRR = {}, Best MRR = {}'.format(mrr, mrr_tail, mrr_head, max_mrr))
+                print('Current MRR = {}, t_pred MRR = {}, h_pred MRR = {}, Best MRR = {}'.format(mrr, mrr_tail, mrr_head, max_mrr))
 
         if global_rank == 0:
             save_checkpoint(ddp_model.module, epoch + 1, opt, scheduler, os.path.join(CHECKPOINT_DIR, f"{FLAGS.name}_e{epoch}.pkl"))
@@ -211,8 +207,8 @@ def partition_dataset_by_rank(dataset, global_rank, world):
     subset = Subset(dataset, rank_idxs)
     return subset
 
+
 def calculate_gather_sizes(dataset, world, num_batches=None, batch_size=None):
-    assert (num_batches is None and batch_size is None) or (num_batches is not None and batch_size is not None)
     num_ranks = world.size()
     if num_batches is None:
         gather_sizes = [math.ceil(len(dataset) / num_ranks)] * (num_ranks - 1)
@@ -278,7 +274,7 @@ def run_inference(dataset: KGInferenceDataset, dataloader: DataLoader, target_lo
     with torch.no_grad():
         model.module.encode_only(True)
         target_embeds = []
-        for i, batch in enumerate(tqdm(target_loader)):
+        for i, batch in enumerate(target_loader):
             batch = prepare_batch_for_model(batch, dataset.base_dataset)
             batch = move_batch_to_device(batch, local_rank)
             input_ids, token_type_ids, attention_mask, ht_tensor, r_tensor, r_query, entity_set, entity_feat, query_nodes, r_relatives, is_head_prediction = batch
@@ -294,7 +290,7 @@ def run_inference(dataset: KGInferenceDataset, dataloader: DataLoader, target_lo
     full_filter_masks = []
     with torch.no_grad():
         model.module.encode_only(False)
-        for i, (batch, true_target, target_filter_mask) in enumerate(tqdm(dataloader)):
+        for i, (batch, true_target, target_filter_mask) in enumerate(dataloader):
             batch = prepare_batch_for_model(batch, dataset.base_dataset)
             batch = move_batch_to_device(batch, local_rank)
             input_ids, token_type_ids, attention_mask, ht_tensor, r_tensor, r_query, entity_set, entity_feat, query_nodes, r_relatives, is_head_prediction = batch
@@ -417,21 +413,22 @@ def gather_results(data: torch.Tensor, global_rank, local_rank, gather_sizes, wo
 
     dist.barrier()
 
-    if all_gather:
-        assert data.shape == gather_list[global_rank].shape, "Gather size does not match data being sent. Check code for bug."
-        dist.all_gather(gather_list, data)
+    if global_rank == 0:
+        gather_list[0] = data
 
+        for p in range(1, world.size()):
+            dist.recv(gather_list[p], src=p, group=world)
     else:
-        if global_rank == 0:
-            gather_list[0] = data
+        assert data.shape == gather_list[global_rank].shape, \
+            f"Gather size {gather_list[global_rank].shape} does not match data being sent {data.shape}. Check code for bug."
+        dist.send(data, dst=0, group=world)
 
-            for p in range(1, world.size()):
-                dist.recv(gather_list[p], src=p, group=world)
-        else:
-            assert data.shape == gather_list[global_rank].shape, "Gather size does not match data being sent. Check code for bug."
-            dist.send(data, dst=0, group=world)
+    dist.barrier()
+    result = torch.cat(gather_list, dim=0)
+    if all_gather:
+        dist.broadcast(result, 0)
 
-    return torch.cat(gather_list, dim=0)
+    return result
 
 
 def main(argv):
