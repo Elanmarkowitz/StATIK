@@ -1,4 +1,5 @@
 import inspect
+import numpy as np
 
 import torch
 import torch.nn.functional as F
@@ -6,13 +7,14 @@ import math
 from torch import nn
 from torch import Tensor
 from transformers import BertModel, DistilBertModel, DistilBertForSequenceClassification
+import torch_scatter
 
 
 class MessageCalculationLayer(nn.Module):
     def __init__(self, embed_dim: int):
         super(MessageCalculationLayer, self).__init__()
         self.embed_dim = embed_dim
-        self.transform_message = nn.Linear(2 * embed_dim, embed_dim)
+        self.transform_message = nn.Linear(4 * embed_dim, embed_dim)
 
     def forward(self, H: Tensor, E: Tensor, heads: Tensor):
         """
@@ -23,7 +25,7 @@ class MessageCalculationLayer(nn.Module):
             processed messages for nodes. shape nodes_in_batch x embed_dim
         """
         H_heads = H[heads]
-        raw_messages = torch.cat([H_heads, E], dim=1)
+        raw_messages = torch.cat([H_heads, E, H_heads + E, H_heads * E], dim=1)
         messages = self.transform_message(raw_messages)
 
         # TODO: Maybe normalize
@@ -31,16 +33,17 @@ class MessageCalculationLayer(nn.Module):
 
 
 class MessagePassingLayer(nn.Module):
-    def __init__(self, embed_dim: int):
+    def __init__(self, embed_dim: int, agg_method="mean"):
+        assert agg_method in ["sum", "mean"]
         super(MessagePassingLayer, self).__init__()
         self.embed_dim = embed_dim
         self.calc_messages_fwd = MessageCalculationLayer(embed_dim)
         self.calc_messages_back = MessageCalculationLayer(embed_dim)
         self.norm = nn.LayerNorm(embed_dim)
         self.act = nn.LeakyReLU()
+        self.agg_method = agg_method
 
-    @staticmethod
-    def aggregate_messages(ht: Tensor, messages_fwd: Tensor, messages_back: Tensor, nodes_in_batch: int):
+    def aggregate_messages(self, ht: Tensor, messages_fwd: Tensor, messages_back: Tensor, nodes_in_batch: int):
         """
         :param ht: shape m x 2
         :param messages_fwd: shape m x embed_dim
@@ -52,11 +55,12 @@ class MessagePassingLayer(nn.Module):
         msg_dst = torch.cat([ht[:, 1], ht[:, 0]])
         messages = torch.cat([messages_fwd, messages_back], dim=0)
         agg_messages = torch.zeros((nodes_in_batch, messages_fwd.shape[1]), dtype=messages_fwd.dtype, device=device)
-        agg_messages = torch.scatter_add(agg_messages, 0, msg_dst.reshape(-1, 1).expand(-1, messages_fwd.shape[1]), messages)
-        num_msgs = torch.zeros((nodes_in_batch,), dtype=torch.float, device=device)
-        unique, counts = msg_dst.unique(return_counts=True)
-        num_msgs[unique] = counts.float()
-        agg_messages = agg_messages / (num_msgs.reshape(-1, 1) + 1e-7)  # take mean of messages
+        if self.agg_method == "sum":
+            torch_scatter.scatter_add(messages, index=msg_dst, dim=0, out=agg_messages)
+        elif self.agg_method == "mean":
+            torch_scatter.scatter_mean(messages, index=msg_dst, dim=0, out=agg_messages)
+        else:
+            raise AssertionError("agg method not known.")
 
         return agg_messages
 
@@ -83,7 +87,7 @@ class TripleClassificationLayer(nn.Module):
         self.act = nn.LeakyReLU()
 
     def forward(self, query_embeds: Tensor, pos_target_embeds: Tensor, neg_target_embeds: Tensor, r_type: Tensor,
-                is_head_prediction: Tensor):
+                is_head_prediction: Tensor, add_batch_to_negs=False):
         """
 
         :param query_embeds:
@@ -93,28 +97,14 @@ class TripleClassificationLayer(nn.Module):
         :param is_head_prediction:
         :return:
         """
-        num_q = query_embeds.shape[0]
-        num_neg_t = neg_target_embeds.shape[0]
-        head_embeds, tail_embeds, bkw_target_embeds, bkw_query_embeds, fwd_query_embeds, fwd_target_embeds = query_target_to_head_tail(
-            query_embeds, pos_target_embeds, neg_target_embeds, is_head_prediction
-        )
+        head_embeds, tail_embeds, neg_head_embeds, neg_tail_embeds = query_target_to_head_tail(
+            query_embeds, pos_target_embeds, neg_target_embeds, is_head_prediction,
+            add_pos_to_negs=self.training)
         pos_examples = torch.cat([head_embeds, tail_embeds, head_embeds - tail_embeds, head_embeds * tail_embeds], dim=-1)
-        fwd_query_embeds = fwd_query_embeds.expand(-1, num_neg_t, -1)
-        fwd_target_embeds = fwd_target_embeds.expand(num_q//2, -1, -1)
-        bkw_query_embeds = bkw_query_embeds.expand(-1, num_neg_t, -1)
-        bkw_target_embeds = bkw_target_embeds.expand(num_q//2, -1, -1)
-        neg_fwd_examples = torch.cat([fwd_query_embeds,
-                                      fwd_target_embeds,
-                                      fwd_query_embeds - fwd_target_embeds,
-                                      fwd_query_embeds * fwd_target_embeds], dim=-1)
-        neg_bkw_examples = torch.cat([bkw_query_embeds,
-                                      bkw_target_embeds,
-                                      bkw_query_embeds - bkw_target_embeds,
-                                      bkw_query_embeds * bkw_target_embeds], dim=-1)
+        neg_examples = torch.cat([neg_head_embeds, neg_tail_embeds, neg_head_embeds - neg_tail_embeds, neg_head_embeds * neg_tail_embeds], dim=-1)
+
         pos_out = self.layer2(self.act(self.layer1(pos_examples)))
-        neg_fwd_out = self.layer2(self.act(self.layer1(neg_fwd_examples)))
-        neg_bkw_out = self.layer2(self.act(self.layer1(neg_bkw_examples)))
-        neg_out = torch.cat([neg_fwd_out, neg_bkw_out], dim=0)
+        neg_out = self.layer2(self.act(self.layer1(neg_examples)))
         return pos_out, neg_out
 
 
@@ -263,7 +253,7 @@ class KGCompletionGNN(nn.Module):
         # Transform entities
         if type(self.language_transformer) in [BertModel]:
             language_embedding = self.language_transformer(input_ids=input_ids, token_type_ids=token_type_ids,
-                                                           attention_mask=attention_mask)[1]
+                                                           attention_mask=attention_mask)[0][:, 0]
         elif type(self.language_transformer) in [DistilBertModel, DistilBertForSequenceClassification]:  # use [CLS] embedding
             language_embedding = self.language_transformer(input_ids=input_ids, attention_mask=attention_mask)[0][:, 0]
         else:
@@ -271,10 +261,10 @@ class KGCompletionGNN(nn.Module):
 
         entity_feat[query_nodes] = language_embedding
 
-        H_0 = self.act(self.entity_input_transform(self.dropout(entity_feat)))
+        H_0 = self.entity_input_transform(self.dropout(entity_feat))
         H_0 = self.norm_entity(H_0)
         H = H_0
-
+        #
         # Transform relations
         r_embed = self.relation_embedding(r_tensor)
         r_direction_embed = self.relative_direction_embedding(r_relative)
@@ -286,7 +276,9 @@ class KGCompletionGNN(nn.Module):
             H = self.dropout(self.message_passing_layers[i](H, E, ht))
             E = self.edge_update_layers[i](H, E, ht)
 
-        final_embeddings = 0.5*H[query_nodes] + 0.5*H_0[query_nodes]  # TODO: look at pooling of message passing
+        # final_embeddings = 0.5*H[query_nodes] + 0.5*H_0[query_nodes]  # TODO: look at pooling of message passing
+
+        final_embeddings = H[query_nodes]
 
         if self._encode_only:
             return final_embeddings
@@ -302,12 +294,12 @@ class KGCompletionGNN(nn.Module):
 
         if self.decoder == "TransE":
             pos_scores, neg_scores = self.transE_decoder(query_embeds, positive_target_embeds, negative_target_embeds,
-                                                         r_query, is_head_prediction)
+                                                         r_query, is_head_prediction, add_batch_to_negs=self.training)
             return pos_scores, neg_scores
         if self.decoder == "MLP+TransE":
             transe_pos_scores, transe_neg_scores = self.transE_decoder(query_embeds, positive_target_embeds,
                                                                        negative_target_embeds, r_query,
-                                                                       is_head_prediction)
+                                                                       is_head_prediction, add_batch_to_negs=self.training)
             if self.training:
                 mlp_pos_scores, mlp_neg_scores = self.classify_triple(query_embeds, positive_target_embeds,
                                                                       negative_target_embeds, r_query, is_head_prediction)
@@ -363,29 +355,42 @@ class KGCompletionGNN(nn.Module):
         return transe_loss + 0.4 * bce_loss
 
 
-def query_target_to_head_tail(query_embeds: Tensor, pos_target_embeds: Tensor, neg_target_embeds: Tensor, is_head_prediction: Tensor):
+def query_target_to_head_tail(query_embeds: Tensor, pos_target_embeds: Tensor, neg_target_embeds: Tensor,
+                              is_head_prediction: Tensor, add_pos_to_negs=False):
+    # num_negs = neg_target_embeds.shape[0]
+    num_q = query_embeds.shape[0]
+    embed_dim = query_embeds.shape[1]
+
     head_embeds = torch.where(is_head_prediction.reshape(-1, 1), pos_target_embeds, query_embeds)
     tail_embeds = torch.where(is_head_prediction.reshape(-1, 1), query_embeds, pos_target_embeds)
 
-    neg_target_embeds = neg_target_embeds.reshape(1, -1, neg_target_embeds.shape[1])  # 1 x num negs x d
-    query_embeds = query_embeds.reshape(-1, 1, query_embeds.shape[1])  # num queries x 1 x d
+    neg_target_embeds = neg_target_embeds.reshape(1, -1, embed_dim).expand(num_q, -1, -1)  # num q x num negs x d
 
-    bkw_query_embeds = query_embeds[is_head_prediction]
-    bkw_target_embeds = neg_target_embeds
+    if add_pos_to_negs:
+        NUM_NEGS = 10
+        neg_targets_from_pos = pos_target_embeds.reshape(1, num_q, embed_dim).expand(num_q, -1, -1)
+        neg_targets_from_pos = neg_targets_from_pos[torch.logical_not(torch.eye(num_q))].reshape(num_q, num_q-1, embed_dim)
+        random_select = torch.randint(0, num_q - 1, (num_q, NUM_NEGS))
+        neg_targets_from_pos = neg_targets_from_pos[torch.arange(num_q).reshape(-1, 1), random_select]
+        neg_target_embeds = torch.cat([neg_target_embeds, neg_targets_from_pos], dim=1)  # num q x num neg + num q - 1 x d
 
-    fwd_query_embeds = query_embeds[torch.logical_not(is_head_prediction)]
-    fwd_target_embeds = neg_target_embeds
+    query_embeds = query_embeds.reshape(-1, 1, embed_dim).expand(-1, neg_target_embeds.shape[1], -1)  # num queries x num neg + num q - 1 x d
 
-    return head_embeds, tail_embeds, bkw_target_embeds, bkw_query_embeds, fwd_query_embeds, fwd_target_embeds
+    neg_head_embeds = torch.where(is_head_prediction.reshape(-1, 1, 1), neg_target_embeds, query_embeds)
+    neg_tail_embeds = torch.where(is_head_prediction.reshape(-1, 1, 1), query_embeds, neg_target_embeds)
+
+    return head_embeds, tail_embeds, neg_head_embeds, neg_tail_embeds
+
 
 class TransEDecoder(nn.Module):
-    def __init__(self, num_relations: int, embed_dim: int, distance_norm: int = 2):
+    def __init__(self, num_relations: int, embed_dim: int, distance_norm: int = 1):
         super(TransEDecoder, self).__init__()
         self.distance_norm = distance_norm
         self.relation_vector = nn.Embedding(num_relations, embed_dim)
-        self.relation_vector.weight.data.uniform_(-6 / math.sqrt(embed_dim), 6 / math.sqrt(embed_dim))
+        nn.init.xavier_uniform_(self.relation_vector.weight.data)
 
-    def forward(self, query_embeds, pos_target_embeds, neg_target_embeds, r_type, is_head_prediction):
+    def forward(self, query_embeds, pos_target_embeds, neg_target_embeds, r_type, is_head_prediction,
+                add_batch_to_negs=False):
         """
 
         :param query_embeds: (Q,d)
@@ -393,32 +398,21 @@ class TransEDecoder(nn.Module):
         :param neg_target_embeds: (num_negs,d)
         :param r_type: (Q,)
         :param is_head_prediction: (Q,) whether the query is associated with a head prediction task (hr->?) vs (tr->?)
+        :param add_batch_to_negs: Whether to use the pos_targets in the batch as negative targets for the rest of the
+                                  batch. Should b used for training only.
         :return:
         """
         relation_embeds = self.relation_vector(r_type)
 
-        head_embeds, tail_embeds, bkw_target_embeds, bkw_query_embeds, fwd_query_embeds, fwd_target_embeds = query_target_to_head_tail(
-            query_embeds, pos_target_embeds, neg_target_embeds, is_head_prediction
-        )
+        head_embeds, tail_embeds, neg_head_embeds, neg_tail_embeds = query_target_to_head_tail(
+            query_embeds, pos_target_embeds, neg_target_embeds, is_head_prediction,
+            add_pos_to_negs=add_batch_to_negs)
 
         pos_distances = self.distance(head_embeds, relation_embeds, tail_embeds, self.distance_norm)
 
         relation_embeds = relation_embeds.reshape(-1, 1, relation_embeds.shape[1])  # num queries x 1 x d
 
-        bkw_relation_embeds = relation_embeds[is_head_prediction]
-
-        head_pred_distances = self.distance(bkw_target_embeds, bkw_relation_embeds, bkw_query_embeds, self.distance_norm)
-
-        fwd_relation_embeds = relation_embeds[torch.logical_not(is_head_prediction)]
-
-        tail_pred_distances = self.distance(fwd_query_embeds, fwd_relation_embeds, fwd_target_embeds, self.distance_norm)
-
-        neg_distances = torch.empty(query_embeds.shape[0], neg_target_embeds.shape[0], device=query_embeds.device)
-        neg_distances[is_head_prediction] = head_pred_distances
-        neg_distances[torch.logical_not(is_head_prediction)] = tail_pred_distances
-
-        if torch.any(torch.isnan(pos_distances)):
-            breakpoint()
+        neg_distances = self.distance(neg_head_embeds, relation_embeds, neg_tail_embeds, self.distance_norm)
 
         return -1*pos_distances, -1*neg_distances
 

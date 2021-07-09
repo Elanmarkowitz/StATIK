@@ -210,7 +210,7 @@ class TrainingCollateFunction:
         for_head = [(h, r, t) for h, r, t in batch]
         for_tail = [(t, r + self.num_relations, h) for h, r, t in batch]
 
-        to_mp_loader = for_head + for_tail + for_head + for_tail
+        to_mp_loader = for_tail + for_head + for_head + for_tail
 
         if negatives is not None:
             to_mp_loader += [(n, -1, -1) for n in negatives]

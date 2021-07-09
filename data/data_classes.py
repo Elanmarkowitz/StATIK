@@ -87,6 +87,14 @@ def get_training_dataset(ds: KGProcessedDataset) -> KGLoadableDataset:
     return KGLoadableDataset(base_dataset, graph, ds.train_hrt)
 
 
+def get_training_inference_dataset(ds: KGProcessedDataset) -> KGInferenceDataset:
+    base_dataset = KGBaseDataset(ds)
+    present_entities = ds.train_entities
+    graph = KGGraph(ds.train_edge_lccsr, ds.train_relation_lccsr, ds.train_degrees, ds.train_indegrees,
+                    ds.train_outdegrees, ds.num_relations, present_entities, len(present_entities))
+    return KGInferenceDataset(base_dataset, graph, ds.train_hrt, ds.train_h_filter, ds.train_t_filter)
+
+
 def get_validation_dataset(ds: KGProcessedDataset) -> KGInferenceDataset:
     base_dataset = KGBaseDataset(ds)
     present_entities = np.concatenate([ds.train_entities, ds.valid_entities])

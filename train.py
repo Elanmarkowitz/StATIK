@@ -11,16 +11,16 @@ import setproctitle
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 import torch.optim as optim
+from transformers import get_linear_schedule_with_warmup
 from ogb.lsc import WikiKG90MEvaluator
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import Dataset, DataLoader, DistributedSampler, Subset, ConcatDataset
+from torch.utils.data import DataLoader, DistributedSampler, Subset, SubsetRandomSampler
 from tqdm import tqdm
 
 from attributed_eval import AttributedEvaluator, convert_stats_to_percentiles
 from data.data_classes import get_testing_dataset, get_training_dataset, get_validation_dataset, KGInferenceDataset, \
-    KGBaseDataset
+    KGBaseDataset, get_training_inference_dataset
 from data.data_loading import TrainingCollateFunction, InferenceCollateQueryFunction, InferenceCollateTargetFunction
 from data.data_processing import load_processed_data, KGProcessedDataset
 from evaluation import compute_eval_stats
@@ -44,8 +44,8 @@ flags.DEFINE_integer("samples_per_node", 10, "Number of neighbors to sample for 
 flags.DEFINE_integer("embed_dim", 256, "Number of dimensions for hidden states.")
 flags.DEFINE_integer("layers", 2, "Number of message passing and edge update layers for model.")
 flags.DEFINE_float("lr", 1e-2, "Learning rate for optimizer.")
-flags.DEFINE_integer("validate_every", 1024, "How many iterations to do between each single batch validation.")
-flags.DEFINE_integer("validation_batches", 1000, "Number of batches to do for each validation check.")
+flags.DEFINE_integer("validate_every", 1, "How many iterations to do between each single batch validation.")
+flags.DEFINE_integer("validation_batches", None, "Number of batches to do for each validation check.")
 flags.DEFINE_integer("valid_batch_size", 1, "Batch size for validation (does all t_candidates at once).")
 flags.DEFINE_integer("epochs", 1, "Num epochs to train for")
 flags.DEFINE_float("margin", 1.0, "Margin in transE loss")
@@ -113,14 +113,25 @@ def train(global_rank, local_rank, world):
     target_dataloader = DataLoader(target_subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
                                    collate_fn=target_collate_fn)
 
+    eval_queries = np.random.choice(np.arange(0, dataset.num_entities), (10000,), replace=False)
+    train_eval_dataset = get_training_inference_dataset(dataset).query_mode()
+    train_eval_collate_fn_tail = InferenceCollateQueryFunction(train_eval_dataset, FLAGS.samples_per_node, head_prediction=False)
+    train_eval_collate_fn_head = InferenceCollateQueryFunction(train_eval_dataset, FLAGS.samples_per_node, head_prediction=False)
+    train_eval_dataset = Subset(train_eval_dataset, eval_queries)  # don't use all queries for mrr calculation
+    train_eval_subset = partition_dataset_by_rank(train_eval_dataset, global_rank, world)
+    train_eval_dataloader_tail = DataLoader(train_eval_subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
+                                            collate_fn=train_eval_collate_fn_tail)
+    train_eval_dataloader_head = DataLoader(train_eval_subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
+                                            collate_fn=train_eval_collate_fn_head)
+
     valid_dataset = get_validation_dataset(dataset).query_mode()
-    valid_sampler = DistributedSampler(valid_dataset, rank=global_rank, shuffle=False)
+    valid_subset = partition_dataset_by_rank(valid_dataset, global_rank, world)
     valid_collate_fn_tail = InferenceCollateQueryFunction(valid_dataset, FLAGS.samples_per_node, head_prediction=False)
-    valid_dataloader_tail = DataLoader(valid_dataset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
-                                       sampler=valid_sampler, drop_last=True, collate_fn=valid_collate_fn_tail)
+    valid_dataloader_tail = DataLoader(valid_subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
+                                       collate_fn=valid_collate_fn_tail)
     valid_collate_fn_head = InferenceCollateQueryFunction(valid_dataset, FLAGS.samples_per_node, head_prediction=True)
-    valid_dataloader_head = DataLoader(valid_dataset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
-                                       sampler=valid_sampler, drop_last=True, collate_fn=valid_collate_fn_head)
+    valid_dataloader_head = DataLoader(valid_subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
+                                       collate_fn=valid_collate_fn_head)
     if FLAGS.checkpoint is not None:
         model = load_model(os.path.join(CHECKPOINT_DIR, FLAGS.checkpoint), ignore_state_dict=(global_rank != 0))
     else:
@@ -131,10 +142,12 @@ def train(global_rank, local_rank, world):
 
     ddp_model = DDP(model, device_ids=[local_rank], process_group=world, find_unused_parameters=True)
     loss_fn = model.get_loss_fn(margin=FLAGS.margin)
-    opt = optim.Adam(ddp_model.parameters(), lr=FLAGS.lr)
-    scheduler = optim.lr_scheduler.MultiStepLR(opt,
-                                               milestones=[len(train_loader), 2 * len(train_loader), 3 * len(train_loader)],
-                                               gamma=0.5)
+    opt = optim.AdamW(ddp_model.parameters(), lr=FLAGS.lr)
+
+    fake_opt = optim.AdamW(ddp_model.parameters(), lr=FLAGS.lr)
+    scheduler = get_linear_schedule_with_warmup(opt,
+                                                num_warmup_steps=int(0.2 * len(train_loader) * FLAGS.epochs),
+                                                num_training_steps=len(train_loader) * FLAGS.epochs)
 
     start_epoch = 0
     if FLAGS.checkpoint:
@@ -171,29 +184,49 @@ def train(global_rank, local_rank, world):
 
                 if global_rank == 0:
                     print(f"Iteration={i}/{len(train_loader)}, "
-                          f"Moving Avg Loss={moving_average_loss.cpu().numpy():.5f}")
+                          f"Moving Avg Loss={moving_average_loss.cpu().numpy():.5f}, "
+                          f"Current Loss={loss.detach().cpu().numpy():.5f}")
 
         if (epoch + 1) % FLAGS.validate_every == 0:
-            ddp_model.eval()
-            eval_gather_sizes = calculate_gather_sizes(valid_dataset, world, FLAGS.validation_batches, FLAGS.valid_batch_size)
-            target_gather_sizes = calculate_gather_sizes(target_dataset, world)
-            result = validate(valid_dataset, valid_dataloader_tail, target_dataloader, ddp_model, global_rank,
-                              local_rank, eval_gather_sizes, target_gather_sizes, num_batches=FLAGS.validation_batches, world=world)
-            result2 = validate(valid_dataset, valid_dataloader_head, target_dataloader, ddp_model, global_rank,
-                               local_rank, eval_gather_sizes, target_gather_sizes, num_batches=FLAGS.validation_batches, world=world)
+            train_t_res, train_h_res = perform_model_validation(
+                ddp_model, train_eval_dataset, target_dataset, train_eval_dataloader_tail, train_eval_dataloader_head,
+                target_dataloader, global_rank, local_rank, world)
             if global_rank == 0:
-                mrr_tail = result['mrr']
-                mrr_head = result2['mrr']
-                result['mrr'] = 0.5 * result['mrr'] + 0.5 * result2['mrr']
-                mrr = result['mrr']
+                mrr_tail = train_t_res['mrr']
+                mrr_head = train_h_res['mrr']
+                mrr = 0.5 * mrr_tail + 0.5 * mrr_head
+                print(f'Train MRR = {mrr}, t_pred MRR = {mrr_tail}, h_pred MRR = {mrr_head}')
+
+            valid_t_res, valid_h_res = perform_model_validation(
+                ddp_model, valid_dataset, target_dataset, valid_dataloader_tail, valid_dataloader_head,
+                target_dataloader, global_rank, local_rank, world)
+            if global_rank == 0:
+                mrr_tail = valid_t_res['mrr']
+                mrr_head = valid_h_res['mrr']
+                mrr = 0.5 * mrr_tail + 0.5 * mrr_head
                 if mrr > max_mrr:
                     max_mrr = mrr
                     save_model(ddp_model.module, os.path.join(CHECKPOINT_DIR, f'{FLAGS.name}_best_model.pkl'))
-
-                print('Current MRR = {}, t_pred MRR = {}, h_pred MRR = {}, Best MRR = {}'.format(mrr, mrr_tail, mrr_head, max_mrr))
+                print(f'Validation MRR = {mrr}, t_pred MRR = {mrr_tail}, h_pred MRR = {mrr_head}, best MRR = {max_mrr}')
 
         if global_rank == 0:
             save_checkpoint(ddp_model.module, epoch + 1, opt, scheduler, os.path.join(CHECKPOINT_DIR, f"{FLAGS.name}_e{epoch}.pkl"))
+
+
+def perform_model_validation(model, eval_dataset, target_dataset, dataloader_tail, dataloader_head, target_dataloader,
+                             global_rank, local_rank, world):
+    model.eval()
+    eval_gather_sizes = calculate_gather_sizes(eval_dataset, world, FLAGS.validation_batches, FLAGS.valid_batch_size)
+    target_gather_sizes = calculate_gather_sizes(target_dataset, world)
+    if isinstance(eval_dataset, Subset):
+        eval_dataset = eval_dataset.dataset
+    t_res = validate(eval_dataset, dataloader_tail, target_dataloader, model, global_rank,
+                     local_rank, eval_gather_sizes, target_gather_sizes, num_batches=FLAGS.validation_batches,
+                     world=world)
+    h_res = validate(eval_dataset, dataloader_head, target_dataloader, model, global_rank,
+                     local_rank, eval_gather_sizes, target_gather_sizes, num_batches=FLAGS.validation_batches,
+                     world=world)
+    return t_res, h_res
 
 
 def partition_dataset_by_rank(dataset, global_rank, world):
@@ -202,7 +235,7 @@ def partition_dataset_by_rank(dataset, global_rank, world):
     start_idx = global_rank * idxs_per_rank
     end_idx = (global_rank + 1) * idxs_per_rank if ((global_rank + 1) * idxs_per_rank <= len(dataset)) else len(dataset)
     rank_idxs = torch.arange(start_idx, end_idx, dtype=torch.long).tolist()
-    print(f"Global rank {global_rank} processing dataset from {rank_idxs[0]} through {rank_idxs[-1]}")
+    # print(f"Global rank {global_rank} processing dataset from {rank_idxs[0]} through {rank_idxs[-1]}")
 
     subset = Subset(dataset, rank_idxs)
     return subset
@@ -210,11 +243,12 @@ def partition_dataset_by_rank(dataset, global_rank, world):
 
 def calculate_gather_sizes(dataset, world, num_batches=None, batch_size=None):
     num_ranks = world.size()
-    if num_batches is None:
+    if num_batches is None or num_batches < 0:
         gather_sizes = [math.ceil(len(dataset) / num_ranks)] * (num_ranks - 1)
         last_size = len(dataset) - sum(gather_sizes)
         gather_sizes.append(last_size)
     else:
+        assert len(dataset) >= (num_batches * batch_size * num_ranks), "Too many validation batches for validation dataset size."
         gather_sizes = [batch_size * num_batches] * num_ranks
 
     return gather_sizes
@@ -227,9 +261,6 @@ def inference_only(global_rank, local_rank, world):
     torch.manual_seed(0)
     random.seed(0)
     np.random.seed(0)
-
-    if FLAGS.validation_batches < 0:
-        FLAGS.validation_batches = None
 
     base_dataset = load_processed_data(FLAGS.root_data_dir, FLAGS.dataset)
     if FLAGS.validation_only:
@@ -261,9 +292,13 @@ def inference_only(global_rank, local_rank, world):
     if FLAGS.validation_only:
         result = validate(eval_dataset, eval_dataloader, target_dataloader, ddp_model, global_rank, local_rank,
                           eval_gather_sizes, target_gather_sizes, FLAGS.validation_batches, world)
+        if global_rank == 0:
+            print('Validation ' + ' '.join([f'{k}={result[k]}' for k in result.keys()]))
     else:
         result = test(eval_dataset, eval_dataloader, target_dataloader, ddp_model, global_rank, local_rank,
                       eval_gather_sizes, target_gather_sizes, FLAGS.validation_batches, world)
+        if global_rank == 0:
+            print('Test ' + ' '.join([f'{k}={result[k]}' for k in result.keys()]))
 
 
 def run_inference(dataset: KGInferenceDataset, dataloader: DataLoader, target_loader: DataLoader, model,
@@ -311,10 +346,10 @@ def run_inference(dataset: KGInferenceDataset, dataloader: DataLoader, target_lo
         agg_pos_scores = gather_results(full_pos_scores.to(local_rank), global_rank, local_rank, eval_gather_sizes, world).cpu()
 
         full_target_scores = torch.cat(full_target_scores, dim=0)
-        agg_target_scores = gather_results(full_target_scores.to(local_rank), global_rank, local_rank, eval_gather_sizes, world).detach().cpu()
+        agg_target_scores = gather_results(full_target_scores.to(local_rank), global_rank, local_rank, eval_gather_sizes, world).cpu()
 
         full_filter_masks = torch.cat(full_filter_masks, dim=0)
-        agg_filter_masks = gather_results(full_filter_masks.to(local_rank), global_rank, local_rank, eval_gather_sizes, world).detach().cpu()
+        agg_filter_masks = gather_results(full_filter_masks.to(local_rank), global_rank, local_rank, eval_gather_sizes, world).cpu()
 
     return agg_pos_scores, agg_target_scores, agg_filter_masks
 
@@ -329,6 +364,7 @@ def validate(valid_dataset: KGInferenceDataset, valid_dataloader: DataLoader, ta
                                                            target_gather_sizes, num_batches, world,
                                                            use_full_preds=use_full_preds)
 
+    result_dict = None
     if global_rank == 0:
         if FLAGS.validation_attribution and FLAGS.validation_only: # TODO: fix this for refactor
             input_dict = {'h,r->t': {'t_pred_top10': top10_preds.cpu().numpy(),
@@ -373,10 +409,7 @@ def validate(valid_dataset: KGInferenceDataset, valid_dataloader: DataLoader, ta
         else: # TODO: fix this for refactor
             input_dict = {'h,r->t': {'t_pred_top10': top10_preds.cpu().numpy(), 't_correct_index': correct_indices.cpu().numpy()}}
             result_dict = evaluator.eval(input_dict)
-        print('Validation ' + ' '.join([f'{k}={result_dict[k]}' for k in result_dict.keys()]))
-        return result_dict
-    else:
-        return None
+    return result_dict
 
 
 def test(test_dataset, test_dataloader: DataLoader, target_dataloader: DataLoader, model, global_rank: int,
@@ -390,11 +423,9 @@ def test(test_dataset, test_dataloader: DataLoader, target_dataloader: DataLoade
     result_dict = None
     if global_rank == 0:
         if use_full_preds:
-            filter_mask[:, test_dataset.ds.valid_entities] = -1
             result_dict = compute_eval_stats(pos_scores.detach().cpu().numpy(),
                                              target_scores.detach().cpu().numpy(),
                                              filter_mask=filter_mask.detach().cpu().numpy())
-            print('Test ' + ' '.join([f'{k}={result_dict[k]}' for k in result_dict.keys()]))
         else:
             print('Saving...')
             assert len(top10_preds) == len(test_dataset), f"Number of predictions is {len(top10_preds)}. Size of dataset is {len(test_dataset)}"
@@ -421,7 +452,7 @@ def gather_results(data: torch.Tensor, global_rank, local_rank, gather_sizes, wo
     else:
         assert data.shape == gather_list[global_rank].shape, \
             f"Gather size {gather_list[global_rank].shape} does not match data being sent {data.shape}. Check code for bug."
-        dist.send(data, dst=0, group=world)
+        dist.send(data.to(local_rank), dst=0, group=world)
 
     dist.barrier()
     result = torch.cat(gather_list, dim=0)

@@ -170,29 +170,29 @@ class ProcessWordNet(object):
         #     self.entity2id[wn_id] = idx
 
         self.entity2id = defaultdict(int)
-        train_ent = set(self.train_hrt['h'].values)
-        train_ent.update(set(self.train_hrt['t'].values))
-        idx = 0
-        for wn_id in train_ent:
-            if wn_id not in self.entity2id:
-                self.entity2id[wn_id] = idx
-                idx += 1
-
-        dev_ent = set(self.valid_hrt['h'].values)
-        dev_ent.update(self.valid_hrt['t'].values)
-        for wn_id in dev_ent:
-            if wn_id not in self.entity2id:
-                self.entity2id[wn_id] = idx
-                idx += 1
-
-        test_ent = set(self.test_hrt['h'].values)
-        test_ent.update(self.test_hrt['t'].values)
-        for wn_id in test_ent:
-            if wn_id not in self.entity2id:
-                self.entity2id[wn_id] = idx
-                idx += 1
-
-
+        # train_ent = set(self.train_hrt['h'].values)
+        # train_ent.update(set(self.train_hrt['t'].values))
+        # idx = 0
+        # for wn_id in train_ent:
+        #     if wn_id not in self.entity2id:
+        #         self.entity2id[wn_id] = idx
+        #         idx += 1
+        #
+        # dev_ent = set(self.valid_hrt['h'].values)
+        # dev_ent.update(self.valid_hrt['t'].values)
+        # for wn_id in dev_ent:
+        #     if wn_id not in self.entity2id:
+        #         self.entity2id[wn_id] = idx
+        #         idx += 1
+        #
+        # test_ent = set(self.test_hrt['h'].values)
+        # test_ent.update(self.test_hrt['t'].values)
+        # for wn_id in test_ent:
+        #     if wn_id not in self.entity2id:
+        #         self.entity2id[wn_id] = idx
+        #         idx += 1
+        for idx, wn_id in enumerate(self.entity_descs['code'].values):
+            self.entity2id[wn_id] = idx
 
         self.relation2id = defaultdict(int)
         for idx, wn_id in enumerate(self.relation_descs['code'].values):
@@ -203,17 +203,17 @@ class ProcessWordNet(object):
     def get_entity_features(self):
         print('Creating features using language model.')
         # if self.dataset_info['dataset'] == 'FB15k-237':
-        #     tokenizer = BertTokenizer.from_pretrained('bert-base-cased')
-        #     model = BertModel.from_pretrained('bert-base-cased')
-        #     pipeline = FeatureExtractionPipeline(model, tokenizer, device=0)
-        #     self.entity_feat = np.array([np.array(pipeline(e))[0,0,:].flatten()
-        #                                  for e in self.entity_descs['description'].apply(ProcessWordNet.get_first_n_words).values])
-        #     self.relation_feat = np.array([np.array(pipeline(e))[0,0,:].flatten()
-        #                                    for e in self.relation_descs['description'].apply(ProcessWordNet.get_first_n_words).values])
+        tokenizer = BertTokenizer.from_pretrained('bert-base-cased')
+        model = BertModel.from_pretrained('bert-base-cased')
+        pipeline = FeatureExtractionPipeline(model, tokenizer, device=0)
+        self.entity_feat = np.array([np.array(pipeline(e))[0,0,:].flatten()
+                                     for e in self.entity_descs['description'].apply(ProcessWordNet.get_first_n_words).values])
+        self.relation_feat = np.array([np.array(pipeline(e))[0,0,:].flatten()
+                                       for e in self.relation_descs['description'].apply(ProcessWordNet.get_first_n_words).values])
         # else:
-        model = SentenceTransformer('stsb-distilroberta-base-v2')
-        self.entity_feat = model.encode(self.entity_descs['description'].apply(ProcessWordNet.get_first_n_words).values)
-        self.relation_feat = model.encode(self.relation_descs['description'].apply(ProcessWordNet.get_first_n_words).values)
+        # model = SentenceTransformer('stsb-distilroberta-base-v2')
+        # self.entity_feat = model.encode(self.entity_descs['description'].apply(ProcessWordNet.get_first_n_words).values)
+        # self.relation_feat = model.encode(self.relation_descs['description'].apply(ProcessWordNet.get_first_n_words).values)
 
     @staticmethod
     def replace_hrt(hrt: pd.DataFrame, map_dict):

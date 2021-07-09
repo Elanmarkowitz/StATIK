@@ -117,10 +117,10 @@ def process_data(root_data_dir: str, dataset_name: str) -> None:
 
     full_rel_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, f'test_rel_lccsr.npz'))
     full_edge_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, f'test_edge_lccsr.npz'))
-    for stage, triples in zip(['valid', 'test'],[dataset.valid_hrt, dataset.test_hrt]):
-        h_filter_mask = get_filtered_candidate_with_lccsr(triples[:, [2,1]], full_edge_lccsr, full_rel_lccsr,
+    for stage, triples in zip(['train', 'valid', 'test'], [dataset.train_hrt, dataset.valid_hrt, dataset.test_hrt]):
+        h_filter_mask = get_filtered_candidate_with_lccsr(triples[:, [2, 1]], full_edge_lccsr, full_rel_lccsr,
                                                           dataset.num_entities, dataset.num_relations, head_pred=True)
-        t_filter_mask = get_filtered_candidate_with_lccsr(triples[:, [0,1]], full_edge_lccsr, full_rel_lccsr,
+        t_filter_mask = get_filtered_candidate_with_lccsr(triples[:, [0, 1]], full_edge_lccsr, full_rel_lccsr,
                                                           dataset.num_entities, dataset.num_relations, head_pred=False)
         np.save(os.path.join(save_dir, f'{stage}_h_filter.npy'), h_filter_mask)
         np.save(os.path.join(save_dir, f'{stage}_t_filter.npy'), t_filter_mask)
@@ -140,7 +140,7 @@ class KGProcessedDataset:
         self.relation_text = loaded.relation_text
         self.train_hrt = loaded.train_hrt
         self.valid_hrt = loaded.valid_hrt
-        self.test_hrt = loaded.train_hrt
+        self.test_hrt = loaded.test_hrt
         self.train_edge_lccsr: LeftContiguousCSR = LeftContiguousCSR.load(os.path.join(load_dir, 'train_edge_lccsr.npz'))
         self.train_relation_lccsr: LeftContiguousCSR = LeftContiguousCSR.load(os.path.join(load_dir, 'train_rel_lccsr.npz'))
         self.valid_edge_lccsr: LeftContiguousCSR = LeftContiguousCSR.load(os.path.join(load_dir, 'valid_edge_lccsr.npz'))
@@ -157,6 +157,8 @@ class KGProcessedDataset:
         self.test_indegrees = np.load(os.path.join(load_dir, 'test_indegrees.npy'))
         self.test_outdegrees = np.load(os.path.join(load_dir, 'valid_outdegrees.npy'))
         self.feature_dim = self.entity_feat.shape[1]
+        self.train_h_filter = np.load(os.path.join(load_dir, 'train_h_filter.npy'))
+        self.train_t_filter = np.load(os.path.join(load_dir, 'train_t_filter.npy'))
         self.valid_h_filter = np.load(os.path.join(load_dir, 'valid_h_filter.npy'))
         self.valid_t_filter = np.load(os.path.join(load_dir, 'valid_t_filter.npy'))
         self.test_h_filter = np.load(os.path.join(load_dir, 'test_h_filter.npy'))
@@ -174,6 +176,13 @@ class KGProcessedDataset:
         entities[self.train_entities] = 0
         entities[self.valid_entities] = 0
         self.test_entities = np.nonzero(entities)[0]
+
+        self.train_h_filter[:, np.concatenate([self.valid_entities, self.test_entities])] = False
+        self.train_t_filter[:, np.concatenate([self.valid_entities, self.test_entities])] = False
+        self.valid_h_filter[:, self.test_entities] = False
+        self.valid_t_filter[:, self.test_entities] = False
+        self.test_h_filter[:, self.valid_entities] = False
+        self.test_t_filter[:, self.valid_entities] = False
 
 
 def load_processed_data(root_data_dir: str, dataset_name: str) -> KGProcessedDataset:
