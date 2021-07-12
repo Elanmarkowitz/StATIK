@@ -140,6 +140,9 @@ def train(global_rank, local_rank, world):
 
     model.to(local_rank)
 
+    saved = torch.load('checkpoints/wn18rr_transe_star_best_model.pkl', map_location="cpu")
+    # model.load_state_dict(saved['state_dict'], strict=False)
+
     ddp_model = DDP(model, device_ids=[local_rank], process_group=world, find_unused_parameters=True)
     loss_fn = model.get_loss_fn(margin=FLAGS.margin)
     opt = optim.AdamW(ddp_model.parameters(), lr=FLAGS.lr)
@@ -155,7 +158,7 @@ def train(global_rank, local_rank, world):
 
     moving_average_loss = torch.tensor(1.0, device=local_rank)
     max_mrr = 0
-
+    max_token_length = 0
     for epoch in range(start_epoch, FLAGS.epochs):
         if global_rank == 0:
             print(f'Epoch {epoch}')
@@ -164,12 +167,15 @@ def train(global_rank, local_rank, world):
             batch = prepare_batch_for_model(batch, dataset)
             batch = move_batch_to_device(batch, local_rank)
             input_ids, token_type_ids, attention_mask, ht_tensor, r_tensor, r_query, entity_set, entity_feat, query_nodes, r_relatives, is_head_prediction = batch
+            # print(f'max prev token size {max_token_length}, curr token length {input_ids.shape[1]}')
             pos_scores, neg_scores = ddp_model(input_ids, token_type_ids, attention_mask, ht_tensor, r_tensor, r_query,
                                                entity_feat, query_nodes, r_relatives, is_head_prediction,
                                                queries=queries, positive_targets=positive_targets,
                                                negative_targets=negative_targets)
 
             loss = loss_fn(pos_scores, neg_scores)
+
+            # max_token_length = max(input_ids.shape[1], max_token_length)
 
             moving_average_loss = .99 * moving_average_loss + 0.01 * loss.detach()
 
@@ -293,12 +299,12 @@ def inference_only(global_rank, local_rank, world):
         result = validate(eval_dataset, eval_dataloader, target_dataloader, ddp_model, global_rank, local_rank,
                           eval_gather_sizes, target_gather_sizes, FLAGS.validation_batches, world)
         if global_rank == 0:
-            print('Validation ' + ' '.join([f'{k}={result[k]}' for k in result.keys()]))
+            print('Validation {' + ', '.join([f'{k}: {result[k]}' for k in result.keys()]) + '}')
     else:
         result = test(eval_dataset, eval_dataloader, target_dataloader, ddp_model, global_rank, local_rank,
                       eval_gather_sizes, target_gather_sizes, FLAGS.validation_batches, world)
         if global_rank == 0:
-            print('Test ' + ' '.join([f'{k}={result[k]}' for k in result.keys()]))
+            print('Test {' + ', '.join([f'{k}: {result[k]}' for k in result.keys()]) + '}')
 
 
 def run_inference(dataset: KGInferenceDataset, dataloader: DataLoader, target_loader: DataLoader, model,
@@ -315,7 +321,7 @@ def run_inference(dataset: KGInferenceDataset, dataloader: DataLoader, target_lo
             input_ids, token_type_ids, attention_mask, ht_tensor, r_tensor, r_query, entity_set, entity_feat, query_nodes, r_relatives, is_head_prediction = batch
             batch_target_embeds = model(input_ids, token_type_ids, attention_mask, ht_tensor, r_tensor, r_query,
                                         entity_feat, query_nodes, r_relatives, is_head_prediction)
-            target_embeds.append(batch_target_embeds)
+            target_embeds.append(batch_target_embeds.cpu())
         target_embeds = torch.cat(target_embeds, dim=0)
 
         full_target_embeds = gather_results(target_embeds, global_rank, local_rank, target_gather_sizes, world, all_gather=True)
@@ -343,13 +349,13 @@ def run_inference(dataset: KGInferenceDataset, dataloader: DataLoader, target_lo
                 dist.barrier(group=world)
 
         full_pos_scores = torch.cat(full_pos_scores, dim=0)
-        agg_pos_scores = gather_results(full_pos_scores.to(local_rank), global_rank, local_rank, eval_gather_sizes, world).cpu()
+        agg_pos_scores = gather_results(full_pos_scores, global_rank, local_rank, eval_gather_sizes, world).cpu()
 
         full_target_scores = torch.cat(full_target_scores, dim=0)
-        agg_target_scores = gather_results(full_target_scores.to(local_rank), global_rank, local_rank, eval_gather_sizes, world).cpu()
+        agg_target_scores = gather_results(full_target_scores, global_rank, local_rank, eval_gather_sizes, world).cpu()
 
         full_filter_masks = torch.cat(full_filter_masks, dim=0)
-        agg_filter_masks = gather_results(full_filter_masks.to(local_rank), global_rank, local_rank, eval_gather_sizes, world).cpu()
+        agg_filter_masks = gather_results(full_filter_masks, global_rank, local_rank, eval_gather_sizes, world).cpu()
 
     return agg_pos_scores, agg_target_scores, agg_filter_masks
 
@@ -439,8 +445,10 @@ def test(test_dataset, test_dataloader: DataLoader, target_dataloader: DataLoade
 def gather_results(data: torch.Tensor, global_rank, local_rank, gather_sizes, world, all_gather=False) -> torch.Tensor:
     gather_list = []
 
+    device = local_rank if dist.get_backend(world) == dist.Backend.NCCL else 'cpu'
+
     for size in gather_sizes:
-        gather_list.append(torch.empty(size, *data.shape[1:], dtype=data.dtype, device=local_rank))
+        gather_list.append(torch.empty(size, *data.shape[1:], dtype=data.dtype, device=device))
 
     dist.barrier()
 
@@ -452,7 +460,7 @@ def gather_results(data: torch.Tensor, global_rank, local_rank, gather_sizes, wo
     else:
         assert data.shape == gather_list[global_rank].shape, \
             f"Gather size {gather_list[global_rank].shape} does not match data being sent {data.shape}. Check code for bug."
-        dist.send(data.to(local_rank), dst=0, group=world)
+        dist.send(data.to(device), dst=0, group=world)
 
     dist.barrier()
     result = torch.cat(gather_list, dim=0)
@@ -468,7 +476,8 @@ def main(argv):
     ws = int(os.environ['WORLD_SIZE'])
     master_addr = os.environ['MASTER_ADDR']
     master_port = os.environ['MASTER_PORT']
-    dist.init_process_group(backend=dist.Backend.NCCL,
+    backend = dist.Backend.GLOO if FLAGS.validation_only or FLAGS.test_only else dist.Backend.NCCL
+    dist.init_process_group(backend=backend,
                             init_method="tcp://{}:{}".format(master_addr, master_port), rank=grank, world_size=ws)
 
     setproctitle.setproctitle("KGCompletionTrainer:{}".format(grank))
