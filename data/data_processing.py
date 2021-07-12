@@ -181,8 +181,6 @@ class KGProcessedDataset:
         self.train_t_filter[:, np.concatenate([self.valid_entities, self.test_entities])] = False
         self.valid_h_filter[:, self.test_entities] = False
         self.valid_t_filter[:, self.test_entities] = False
-        self.test_h_filter[:, self.valid_entities] = False
-        self.test_t_filter[:, self.valid_entities] = False
 
 
 def load_processed_data(root_data_dir: str, dataset_name: str) -> KGProcessedDataset:
