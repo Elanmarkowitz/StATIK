@@ -1,4 +1,5 @@
 import tarfile
+import unicodedata
 
 import pandas as pd
 import numpy as np
@@ -85,7 +86,7 @@ class ProcessWordNet(object):
         return desc
 
     @staticmethod
-    def get_first_n_words(desc, n=32):
+    def get_first_n_words(desc, n=24):
         words = desc.split(' ')
         return ' '.join(words[:n])
 
@@ -93,7 +94,21 @@ class ProcessWordNet(object):
 
         ent_desc = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['ent_desc']), names=['code', 'description'], sep='\t')
         rel_desc = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['rel_desc']), names=['code', 'description'], sep='\t')
+        ent_desc['description'] = self._simplify_text_data(ent_desc['description'])
+        rel_desc['description'] = self._simplify_text_data(rel_desc['description'])
         return ent_desc, rel_desc
+
+    @staticmethod
+    def _simplify_text_data(data: pd.Series):
+        data = data.apply(lambda x: x.replace('\\\\n', ' '))
+        data = data.apply(lambda x: x.replace('\\\\t', ' '))
+        data = data.apply(lambda x: x.replace('\\\\', ''))
+        data = data.apply(ProcessWordNet._remove_accented_chars)
+        return data
+
+    @staticmethod
+    def _remove_accented_chars(text):
+        return unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8', 'ignore')
 
     def write_to_npy(self, np_array, filename):
         np.save(os.path.join(self.data_dir, 'processed', filename[:-len('txt')] + 'npy'), np_array)
