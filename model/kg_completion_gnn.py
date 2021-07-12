@@ -203,6 +203,7 @@ class KGCompletionGNN(nn.Module):
         self.edge_input_transform = nn.Linear(input_dim, embed_dim)
 
         self.entity_input_transform = nn.Linear(input_dim, embed_dim)
+        self.entity_input_transform2 = nn.Linear(input_dim, embed_dim)
 
         self.norm_entity = nn.LayerNorm(embed_dim)
         self.norm_edge = nn.LayerNorm(embed_dim)
@@ -259,9 +260,9 @@ class KGCompletionGNN(nn.Module):
         else:
             raise Exception('Unknown language model type')
 
-        entity_feat[query_nodes] = language_embedding
+        # entity_feat[query_nodes] = language_embedding
 
-        H_0 = self.entity_input_transform(self.dropout(entity_feat))
+        H_0 = self.entity_input_transform2(self.dropout(entity_feat))
         H_0 = self.norm_entity(H_0)
         H = H_0
         #
@@ -278,7 +279,7 @@ class KGCompletionGNN(nn.Module):
 
         # final_embeddings = 0.5*H[query_nodes] + 0.5*H_0[query_nodes]  # TODO: look at pooling of message passing
 
-        final_embeddings = H[query_nodes]
+        final_embeddings = self.norm_entity(H[query_nodes]) + self.norm_entity(self.entity_input_transform(language_embedding))
 
         if self._encode_only:
             return final_embeddings
@@ -367,7 +368,7 @@ def query_target_to_head_tail(query_embeds: Tensor, pos_target_embeds: Tensor, n
     neg_target_embeds = neg_target_embeds.reshape(1, -1, embed_dim).expand(num_q, -1, -1)  # num q x num negs x d
 
     if add_pos_to_negs:
-        NUM_NEGS = 10
+        NUM_NEGS = 16
         neg_targets_from_pos = pos_target_embeds.reshape(1, num_q, embed_dim).expand(num_q, -1, -1)
         neg_targets_from_pos = neg_targets_from_pos[torch.logical_not(torch.eye(num_q))].reshape(num_q, num_q-1, embed_dim)
         random_select = torch.randint(0, num_q - 1, (num_q, NUM_NEGS))
