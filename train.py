@@ -1,3 +1,4 @@
+import json
 import math
 import random
 from typing import Union
@@ -24,7 +25,7 @@ from data.data_classes import get_testing_dataset, get_training_dataset, get_val
 from data.data_loading import TrainingCollateFunction, InferenceCollateQueryFunction, InferenceCollateTargetFunction
 from data.data_processing import load_processed_data, KGProcessedDataset
 from evaluation import compute_eval_stats
-from model.kg_completion_gnn import KGCompletionGNN
+from model.kg_completion_gnn import KGCompletionGNN, ModelConfig
 from utils import load_model, load_opt_checkpoint, save_checkpoint, save_model
 
 FLAGS = flags.FLAGS
@@ -32,7 +33,7 @@ flags.DEFINE_string("dataset", "wikikg90m_kddcup2021", "Specifies dataset from [
 flags.DEFINE_string("root_data_dir", "/nas/home/elanmark/data", "Root data dir for installing the ogb dataset")
 
 flags.DEFINE_integer("num_workers", 0, "Number of workers for the dataloader.")
-flags.DEFINE_integer("local_rank", 0, "How frequently to print learning statistics in number of iterations")  # TODO: Change description here
+flags.DEFINE_integer("local_rank", 0, "Local rank, used for torch distributed launch.")
 flags.DEFINE_integer("print_freq", 1024, "How frequently to print learning statistics in number of iterations")
 flags.DEFINE_string("device", "cuda", "Device to use (cuda/cpu).")
 flags.DEFINE_string("checkpoint", None, "Resume training from checkpoint file in checkpoints directory.")
@@ -45,12 +46,15 @@ flags.DEFINE_integer("embed_dim", 256, "Number of dimensions for hidden states."
 flags.DEFINE_integer("layers", 2, "Number of message passing and edge update layers for model.")
 flags.DEFINE_float("lr", 1e-2, "Learning rate for optimizer.")
 flags.DEFINE_integer("validate_every", 1, "How many iterations to do between each single batch validation.")
-flags.DEFINE_integer("validation_batches", None, "Number of batches to do for each validation check.")
+flags.DEFINE_integer("validation_batches", None, "Max number of batches to do for each validation check (default: None).")
 flags.DEFINE_integer("valid_batch_size", 1, "Batch size for validation (does all t_candidates at once).")
 flags.DEFINE_integer("epochs", 1, "Num epochs to train for")
 flags.DEFINE_float("margin", 1.0, "Margin in transE loss")
-flags.DEFINE_string("decoder", "MLP+TransE", "Choose decoder from [MLP, TransE, MLP+TransE]")
+flags.DEFINE_string("decoder", "MLP+TransE", "Choose decoder from [TBA]")
+flags.DEFINE_string("language_model", "bert-base-cased", "Name of language model to use for encoding [from huggingface]")
+flags.DEFINE_string("encoder", "ours_parallel", "Encoder type to use [ours_parallel, ours_sequential, BLP, StAR]")
 flags.DEFINE_float("dropout", 0.0, "Dropout on input features.")
+flags.DEFINE_float("warmup", 0.2, "Warmup period as proportion of total training")
 
 flags.DEFINE_bool('validation_only', False, 'Whether or not to do a complete inference run across the validation set')
 flags.DEFINE_bool('test_only', False, 'Whether or not to do a complete inference run across the test set')
@@ -102,21 +106,24 @@ def train(global_rank, local_rank, world):
 
     train_dataset = get_training_dataset(dataset)
     train_sampler = DistributedSampler(train_dataset, rank=global_rank, shuffle=True)
+    train_collate_fn = TrainingCollateFunction(train_dataset, max_neighbors=FLAGS.samples_per_node,
+                                               num_negatives=FLAGS.neg_samples, encoder_method=FLAGS.encoder)
     train_loader = DataLoader(train_dataset, batch_size=FLAGS.batch_size,
                               num_workers=FLAGS.num_workers, sampler=train_sampler,
-                              collate_fn=TrainingCollateFunction(train_dataset, max_neighbors=FLAGS.samples_per_node,
-                                                                 num_negatives=FLAGS.neg_samples))
+                              collate_fn=train_collate_fn)
 
     target_dataset = get_validation_dataset(dataset).target_mode()
     target_subset = partition_dataset_by_rank(target_dataset, global_rank, world)
-    target_collate_fn = InferenceCollateTargetFunction(target_dataset, FLAGS.samples_per_node)
+    target_collate_fn = InferenceCollateTargetFunction(target_dataset, FLAGS.samples_per_node, FLAGS.encoder)
     target_dataloader = DataLoader(target_subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
                                    collate_fn=target_collate_fn)
 
     eval_queries = np.random.choice(np.arange(0, dataset.num_entities), (10000,), replace=False)
     train_eval_dataset = get_training_inference_dataset(dataset).query_mode()
-    train_eval_collate_fn_tail = InferenceCollateQueryFunction(train_eval_dataset, FLAGS.samples_per_node, head_prediction=False)
-    train_eval_collate_fn_head = InferenceCollateQueryFunction(train_eval_dataset, FLAGS.samples_per_node, head_prediction=False)
+    train_eval_collate_fn_tail = InferenceCollateQueryFunction(train_eval_dataset, FLAGS.samples_per_node,
+                                                               head_prediction=False, encoder_method=FLAGS.encoder)
+    train_eval_collate_fn_head = InferenceCollateQueryFunction(train_eval_dataset, FLAGS.samples_per_node,
+                                                               head_prediction=False, encoder_method=FLAGS.encoder)
     train_eval_dataset = Subset(train_eval_dataset, eval_queries)  # don't use all queries for mrr calculation
     train_eval_subset = partition_dataset_by_rank(train_eval_dataset, global_rank, world)
     train_eval_dataloader_tail = DataLoader(train_eval_subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
@@ -126,17 +133,18 @@ def train(global_rank, local_rank, world):
 
     valid_dataset = get_validation_dataset(dataset).query_mode()
     valid_subset = partition_dataset_by_rank(valid_dataset, global_rank, world)
-    valid_collate_fn_tail = InferenceCollateQueryFunction(valid_dataset, FLAGS.samples_per_node, head_prediction=False)
+    valid_collate_fn_tail = InferenceCollateQueryFunction(valid_dataset, FLAGS.samples_per_node, head_prediction=False,
+                                                          encoder_method=FLAGS.encoder)
     valid_dataloader_tail = DataLoader(valid_subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
                                        collate_fn=valid_collate_fn_tail)
-    valid_collate_fn_head = InferenceCollateQueryFunction(valid_dataset, FLAGS.samples_per_node, head_prediction=True)
+    valid_collate_fn_head = InferenceCollateQueryFunction(valid_dataset, FLAGS.samples_per_node, head_prediction=True,
+                                                          encoder_method=FLAGS.encoder)
     valid_dataloader_head = DataLoader(valid_subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
                                        collate_fn=valid_collate_fn_head)
     if FLAGS.checkpoint is not None:
         model = load_model(os.path.join(CHECKPOINT_DIR, FLAGS.checkpoint), ignore_state_dict=(global_rank != 0))
     else:
-        model = KGCompletionGNN(dataset.relation_feat, dataset.num_relations, dataset.feature_dim, FLAGS.embed_dim,
-                                FLAGS.layers, decoder=FLAGS.decoder, dropout=FLAGS.dropout)
+        model = KGCompletionGNN(dataset.relation_feat, dataset.num_relations, dataset.feature_dim, ModelConfig(FLAGS))
 
     model.to(local_rank)
 
@@ -145,11 +153,11 @@ def train(global_rank, local_rank, world):
 
     ddp_model = DDP(model, device_ids=[local_rank], process_group=world, find_unused_parameters=True)
     loss_fn = model.get_loss_fn(margin=FLAGS.margin)
-    opt = optim.AdamW(ddp_model.parameters(), lr=FLAGS.lr)
+    opt = optim.AdamW(ddp_model.parameters(), lr=FLAGS.lr, betas=(.9, .98))
 
     fake_opt = optim.AdamW(ddp_model.parameters(), lr=FLAGS.lr)
     scheduler = get_linear_schedule_with_warmup(opt,
-                                                num_warmup_steps=int(0.2 * len(train_loader) * FLAGS.epochs),
+                                                num_warmup_steps=int(FLAGS.warmup * len(train_loader) * FLAGS.epochs),
                                                 num_training_steps=len(train_loader) * FLAGS.epochs)
 
     start_epoch = 0
@@ -277,15 +285,18 @@ def inference_only(global_rank, local_rank, world):
         target_dataset = get_testing_dataset(base_dataset).target_mode()
 
     target_subset = partition_dataset_by_rank(target_dataset, global_rank, world)
-    target_collate_fn = InferenceCollateTargetFunction(target_dataset, FLAGS.samples_per_node)
+    target_collate_fn = InferenceCollateTargetFunction(target_dataset, FLAGS.samples_per_node, FLAGS.encoder)
     target_dataloader = DataLoader(target_subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
                                    collate_fn=target_collate_fn)
     target_gather_sizes = calculate_gather_sizes(target_dataset, world)
 
     eval_subset = partition_dataset_by_rank(eval_dataset, global_rank, world)
-    eval_collate_fn = InferenceCollateQueryFunction(eval_dataset, FLAGS.samples_per_node, FLAGS.predict_heads)
-    eval_dataloader = DataLoader(eval_subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
-                                 collate_fn=eval_collate_fn)
+    eval_collate_fn_head = InferenceCollateQueryFunction(eval_dataset, FLAGS.samples_per_node, True, FLAGS.encoder)
+    eval_dataloader_head = DataLoader(eval_subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
+                                 collate_fn=eval_collate_fn_head)
+    eval_collate_fn_tail = InferenceCollateQueryFunction(eval_dataset, FLAGS.samples_per_node, False, FLAGS.encoder)
+    eval_dataloader_tail = DataLoader(eval_subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
+                                 collate_fn=eval_collate_fn_tail)
     eval_gather_sizes = calculate_gather_sizes(eval_dataset, world, FLAGS.validation_batches, FLAGS.valid_batch_size)
 
     assert FLAGS.model_path is not None, 'Must be supplied with model to do inference.'
@@ -295,16 +306,19 @@ def inference_only(global_rank, local_rank, world):
     ddp_model = DDP(model, device_ids=[local_rank], process_group=world)
     ddp_model.eval()
 
-    if FLAGS.validation_only:
-        result = validate(eval_dataset, eval_dataloader, target_dataloader, ddp_model, global_rank, local_rank,
-                          eval_gather_sizes, target_gather_sizes, FLAGS.validation_batches, world)
-        if global_rank == 0:
-            print('Validation {' + ', '.join([f'{k}: {result[k]}' for k in result.keys()]) + '}')
-    else:
-        result = test(eval_dataset, eval_dataloader, target_dataloader, ddp_model, global_rank, local_rank,
-                      eval_gather_sizes, target_gather_sizes, FLAGS.validation_batches, world)
-        if global_rank == 0:
-            print('Test {' + ', '.join([f'{k}: {result[k]}' for k in result.keys()]) + '}')
+    result = {}
+    for mode, loader in zip(["head", "tail"], [eval_dataloader_head, eval_dataloader_tail]):
+        if FLAGS.validation_only:
+            result[mode] = validate(eval_dataset, loader, target_dataloader, ddp_model, global_rank, local_rank,
+                                    eval_gather_sizes, target_gather_sizes, FLAGS.validation_batches, world)
+        else:
+            result[mode] = test(eval_dataset, loader, target_dataloader, ddp_model, global_rank, local_rank,
+                                eval_gather_sizes, target_gather_sizes, FLAGS.validation_batches, world)
+    if global_rank == 0:
+        result["mean"] = {}
+        for key in result["head"].keys():
+            result["mean"][key] = 0.5 * result["head"][key] + 0.5 * result["tail"][key]
+        print(json.dumps(result, indent=2, sort_keys=False))
 
 
 def run_inference(dataset: KGInferenceDataset, dataloader: DataLoader, target_loader: DataLoader, model,
@@ -453,7 +467,7 @@ def gather_results(data: torch.Tensor, global_rank, local_rank, gather_sizes, wo
     dist.barrier()
 
     if global_rank == 0:
-        gather_list[0] = data
+        gather_list[0] = data.to(device)
 
         for p in range(1, world.size()):
             dist.recv(gather_list[p], src=p, group=world)

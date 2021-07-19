@@ -113,10 +113,11 @@ class MessagePassingLoadingFunction:
 
 
 class TokenizerLoadingFunction:
-    def __init__(self, tokenizer: BertTokenizer, entity_text, relation_text):
+    def __init__(self, tokenizer: BertTokenizer, entity_text, relation_text, method):
         self.tokenizer = tokenizer
         self.entity_text = entity_text
         self.relation_text = relation_text
+        self.method = method
 
     def __call__(self, batch):
         """
@@ -151,10 +152,11 @@ class TokenizerLoadingFunction:
     def _combine_text(self, entity_text, relation_text=None, head_prediction=False):
         text = self._get_n_words(entity_text)
         if relation_text is not None:
-            relation_text = f"inverse of {relation_text}" if head_prediction else relation_text
-            text = text + self.tokenizer.sep_token + self._get_n_words(relation_text)
+            if self.method in ['StAR', 'ours_parallel', 'ours_sequential']:  # Do nothing for BLP
+                relation_text = f"inverse of {relation_text}" if head_prediction else relation_text
+                text = (text, self._get_n_words(relation_text))
 
-        return text  # TODO (optional): deal with token_type_ids
+        return text
 
     @staticmethod
     def _get_n_words(text, n=32):
@@ -162,10 +164,11 @@ class TokenizerLoadingFunction:
 
 
 class TrainingCollateFunction:
-    def __init__(self, dataset: KGLoadableDataset, max_neighbors, num_negatives):
+    def __init__(self, dataset: KGLoadableDataset, max_neighbors, num_negatives, encoder_method):
         self.tokenizer_loading_fn = TokenizerLoadingFunction(BertTokenizer.from_pretrained('bert-base-cased'),
                                                              entity_text=dataset.base_dataset.entity_text,
-                                                             relation_text=dataset.base_dataset.relation_text)
+                                                             relation_text=dataset.base_dataset.relation_text,
+                                                             method=encoder_method)
         self.message_passing_loading_fn = MessagePassingLoadingFunction(dataset.graph, max_neighbors=max_neighbors)
         self.num_negatives = num_negatives
         self.num_relations = dataset.base_dataset.num_relations
@@ -237,10 +240,11 @@ class TrainingCollateFunction:
 
 
 class InferenceCollateTargetFunction:
-    def __init__(self, dataset: KGInferenceDataset, max_neighbors):
+    def __init__(self, dataset: KGInferenceDataset, max_neighbors, encoder_method):
         self.tokenizer_loading_fn = TokenizerLoadingFunction(BertTokenizer.from_pretrained('bert-base-cased'),
                                                              entity_text=dataset.base_dataset.entity_text,
-                                                             relation_text=dataset.base_dataset.relation_text)
+                                                             relation_text=dataset.base_dataset.relation_text,
+                                                             method=encoder_method)
         self.message_passing_loading_fn = MessagePassingLoadingFunction(dataset.graph, max_neighbors=max_neighbors)
 
     def __call__(self, batch):
@@ -258,10 +262,11 @@ class InferenceCollateTargetFunction:
 
 
 class InferenceCollateQueryFunction:
-    def __init__(self, dataset: KGInferenceDataset, max_neighbors, head_prediction: bool):
+    def __init__(self, dataset: KGInferenceDataset, max_neighbors, head_prediction: bool, encoder_method):
         self.tokenizer_loading_fn = TokenizerLoadingFunction(BertTokenizer.from_pretrained('bert-base-cased'),
                                                              entity_text=dataset.base_dataset.entity_text,
-                                                             relation_text=dataset.base_dataset.relation_text)
+                                                             relation_text=dataset.base_dataset.relation_text,
+                                                             method=encoder_method)
         self.message_passing_loading_fn = MessagePassingLoadingFunction(dataset.graph, max_neighbors=max_neighbors)
         self.num_relations = dataset.base_dataset.num_relations
         self.head_prediction = head_prediction

@@ -12,6 +12,7 @@ DATASET_INFO = {
         'test': 'ind-test.tsv',
         'dev': 'ind-dev.tsv',
         'ent_desc': 'entity2textlong.txt',
+        'ent_desc2': 'entity2text.txt',
         'rel_desc': 'relation2text.txt'
     }
 

@@ -6,8 +6,20 @@ import torch.nn.functional as F
 import math
 from torch import nn
 from torch import Tensor
-from transformers import BertModel, DistilBertModel, DistilBertForSequenceClassification
+from transformers import AutoModel
 import torch_scatter
+
+ENCODERS = ['ours_parallel', 'ours_sequential', 'BLP', 'StAR']
+
+
+class ModelConfig:
+    def __init__(self, FLAGS):
+        self.encoder = FLAGS.encoder
+        self.decoder = FLAGS.decoder
+        self.layers = FLAGS.layers
+        self.embed_dim = FLAGS.embed_dim
+        self.language_model = FLAGS.language_model
+        self.dropout = FLAGS.dropout
 
 
 class MessageCalculationLayer(nn.Module):
@@ -177,49 +189,51 @@ class RelationCorrelationModel(nn.Module):
 
 
 class KGCompletionGNN(nn.Module):
-    def __init__(self, relation_feat, num_relations: int, input_dim: int, embed_dim: int, num_layers: int,
-                 norm: int = 2, decoder: str = "MLP+TransE", dropout=0.5):
+    def __init__(self, relation_feat, num_relations: int, input_dim: int, config: ModelConfig):
         super(KGCompletionGNN, self).__init__()
 
         local_vals = locals()
         self.instantiation_args = [local_vals[arg] for arg in inspect.signature(KGCompletionGNN).parameters]
         self.arg_signature = list(inspect.signature(KGCompletionGNN).parameters)
 
-        self.embed_dim = embed_dim
-        self.num_layers = num_layers
-        self.norm = norm
-        self.dropout = nn.Dropout(p=dropout)
+        self.language_model = config.language_model
+        self.encoder = config.encoder
+        self.decoder = config.decoder
+        assert self.encoder in ENCODERS, f'encoder must be one of {ENCODERS}'
+
+        self.embed_dim = config.embed_dim
+        self.num_layers = config.layers
+        self.dropout = nn.Dropout(p=config.dropout)
         self._encode_only = False
 
-        self.language_transformer = BertModel.from_pretrained('bert-base-cased')
+        self.language_transformer = AutoModel.from_pretrained(self.language_model)
 
         self.relation_embedding = nn.Embedding(num_relations, input_dim)
         if relation_feat is not None:
             self.relation_embedding.weight = nn.Parameter(torch.tensor(relation_feat, dtype=torch.float))
-        self.relation_embedding.weight.requires_grad = False  # Comment to learn through message passing relation embedding table
-        self.relative_direction_embedding = nn.Embedding(2, embed_dim)
-        self.head_or_tail_edge_embedding = nn.Embedding(2, embed_dim)
+        self.relation_embedding.weight.requires_grad = False   # Comment to learn through message passing relation embedding table
+        self.relative_direction_embedding = nn.Embedding(2, self.embed_dim)
+        self.head_or_tail_edge_embedding = nn.Embedding(2, self.embed_dim)
 
-        self.edge_input_transform = nn.Linear(input_dim, embed_dim)
+        self.edge_input_transform = nn.Linear(input_dim, self.embed_dim)
 
-        self.entity_input_transform = nn.Linear(input_dim, embed_dim)
-        self.entity_input_transform2 = nn.Linear(input_dim, embed_dim)
+        self.entity_input_transform = nn.Linear(input_dim, self.embed_dim)
+        self.entity_input_transform2 = nn.Linear(input_dim, self.embed_dim)
 
-        self.norm_entity = nn.LayerNorm(embed_dim)
-        self.norm_edge = nn.LayerNorm(embed_dim)
+        self.norm_entity = nn.LayerNorm(self.embed_dim)
+        self.norm_edge = nn.LayerNorm(self.embed_dim)
 
         self.message_passing_layers = nn.ModuleList()
         self.edge_update_layers = nn.ModuleList()
 
-        for i in range(num_layers):
-            self.message_passing_layers.append(MessagePassingLayer(embed_dim))
-            self.edge_update_layers.append(EdgeUpdateLayer(embed_dim))
+        for i in range(self.num_layers):
+            self.message_passing_layers.append(MessagePassingLayer(self.embed_dim))
+            self.edge_update_layers.append(EdgeUpdateLayer(self.embed_dim))
 
-        self.relation_correlation_model = RelationCorrelationModel(num_relations, embed_dim)
+        self.relation_correlation_model = RelationCorrelationModel(num_relations, self.embed_dim)
 
-        self.decoder = decoder
-        self.classify_triple = TripleClassificationLayer(embed_dim)
-        self.transE_decoder = TransEDecoder(num_relations, embed_dim)
+        self.classify_triple = TripleClassificationLayer(self.embed_dim)
+        self.transE_decoder = TransEDecoder(num_relations, self.embed_dim)
         # self.conv_decoder = ConvolutionDecoder(embed_dim)
 
         self.act = nn.LeakyReLU()
@@ -233,7 +247,6 @@ class KGCompletionGNN(nn.Module):
                 r_tensor: Tensor, r_query: Tensor, entity_feat: Tensor, query_nodes: Tensor, r_relative: Tensor,
                 is_head_prediction: Tensor, queries=None, negative_targets=None, positive_targets=None, target_embeddings=None):
         """
-
         :param input_ids: For BERT
         :param token_type_ids: For BERT
         :param attention_mask: For BERT
@@ -252,15 +265,11 @@ class KGCompletionGNN(nn.Module):
         :return:
         """
         # Transform entities
-        if type(self.language_transformer) in [BertModel]:
-            language_embedding = self.language_transformer(input_ids=input_ids, token_type_ids=token_type_ids,
-                                                           attention_mask=attention_mask)[0][:, 0]
-        elif type(self.language_transformer) in [DistilBertModel, DistilBertForSequenceClassification]:  # use [CLS] embedding
-            language_embedding = self.language_transformer(input_ids=input_ids, attention_mask=attention_mask)[0][:, 0]
-        else:
-            raise Exception('Unknown language model type')
+        language_embedding = self.language_transformer(input_ids=input_ids, token_type_ids=token_type_ids,
+                                                       attention_mask=attention_mask)[0][:, 0]
 
-        # entity_feat[query_nodes] = language_embedding
+        if self.encoder == "ours_sequential":
+            entity_feat[query_nodes] = language_embedding
 
         H_0 = self.entity_input_transform2(self.dropout(entity_feat))
         H_0 = self.norm_entity(H_0)
@@ -279,7 +288,16 @@ class KGCompletionGNN(nn.Module):
 
         # final_embeddings = 0.5*H[query_nodes] + 0.5*H_0[query_nodes]  # TODO: look at pooling of message passing
 
-        final_embeddings = self.norm_entity(H[query_nodes]) + self.norm_entity(self.entity_input_transform(language_embedding))
+        if self.encoder == "ours_sequential":
+            final_embeddings = H[query_nodes]
+        elif self.encoder == "ours_parallel":
+            final_embeddings = H[query_nodes] + self.entity_input_transform(language_embedding)
+        elif self.encoder == "BLP":
+            final_embeddings = self.entity_input_transform(language_embedding)
+        elif self.encoder == 'StAR':
+            final_embeddings = language_embedding  # TODO: check that this is how they handle
+        else:
+            raise Exception(f'Unknown handling of {self.encoder}, check code for issue')
 
         if self._encode_only:
             return final_embeddings
@@ -371,8 +389,8 @@ def query_target_to_head_tail(query_embeds: Tensor, pos_target_embeds: Tensor, n
         NUM_NEGS = 16
         neg_targets_from_pos = pos_target_embeds.reshape(1, num_q, embed_dim).expand(num_q, -1, -1)
         neg_targets_from_pos = neg_targets_from_pos[torch.logical_not(torch.eye(num_q))].reshape(num_q, num_q-1, embed_dim)
-        random_select = torch.randint(0, num_q - 1, (num_q, NUM_NEGS))
-        neg_targets_from_pos = neg_targets_from_pos[torch.arange(num_q).reshape(-1, 1), random_select]
+        # random_select = torch.randint(0, num_q - 1, (num_q, NUM_NEGS))
+        # neg_targets_from_pos = neg_targets_from_pos[torch.arange(num_q).reshape(-1, 1), random_select]
         neg_target_embeds = torch.cat([neg_target_embeds, neg_targets_from_pos], dim=1)  # num q x num neg + num q - 1 x d
 
     query_embeds = query_embeds.reshape(-1, 1, embed_dim).expand(-1, neg_target_embeds.shape[1], -1)  # num queries x num neg + num q - 1 x d
@@ -393,7 +411,6 @@ class TransEDecoder(nn.Module):
     def forward(self, query_embeds, pos_target_embeds, neg_target_embeds, r_type, is_head_prediction,
                 add_batch_to_negs=False):
         """
-
         :param query_embeds: (Q,d)
         :param pos_target_embeds: (Q,d)
         :param neg_target_embeds: (num_negs,d)

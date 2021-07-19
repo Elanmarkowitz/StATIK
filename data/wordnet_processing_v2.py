@@ -90,12 +90,37 @@ class ProcessWordNet(object):
         words = desc.split(' ')
         return ' '.join(words[:n])
 
-    def read_descriptions(self):
+    def read_descriptions(self, ent_mapping: dict = None, rel_mapping: dict = None):
 
-        ent_desc = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['ent_desc']), names=['code', 'description'], sep='\t')
-        rel_desc = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['rel_desc']), names=['code', 'description'], sep='\t')
+        ent_desc = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['ent_desc']),
+                               names=['code', 'description'], sep='\t')
+        rel_desc = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['rel_desc']),
+                               names=['code', 'description'], sep='\t')
+
         ent_desc['description'] = self._simplify_text_data(ent_desc['description'])
         rel_desc['description'] = self._simplify_text_data(rel_desc['description'])
+
+        ent_desc['id'] = ent_desc['code'].map(lambda x: ent_mapping.get(x, -1))
+        rel_desc['id'] = rel_desc['code'].map(lambda x: rel_mapping.get(x, -1))
+
+        ent_desc = ent_desc[ent_desc['id'] != -1]
+        rel_desc = rel_desc[rel_desc['id'] != -1]
+
+        if 'ent_desc2' in self.dataset_info:
+            ent_desc2 = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['ent_desc2']),
+                                    names=['code', 'description'], sep='\t')
+            ent_desc2['description'] = self._simplify_text_data(ent_desc2['description'])
+            ent_desc2['id'] = ent_desc2['code'].map(lambda x: ent_mapping.get(x, -1))
+            ent_desc2 = ent_desc2[ent_desc2['id'] != -1]
+
+            full_desc_id = set(ent_desc.id.values)
+            for row in ent_desc2.iterrows():
+                if row[1]['id'] not in full_desc_id:
+                    ent_desc = ent_desc.append(row[1])
+
+        ent_desc = ent_desc.sort_values(by='id', axis='index')
+        rel_desc = rel_desc.sort_values(by='id', axis='index')
+
         return ent_desc, rel_desc
 
     @staticmethod
@@ -122,13 +147,6 @@ class ProcessWordNet(object):
         if not os.path.isdir(os.path.join(self.data_dir, 'processed')):
             os.mkdir(os.path.join(self.data_dir, 'processed'))
 
-        self.entity_descs, self.relation_descs = self.read_descriptions()
-        self.entity_text = self.entity_descs['description'].values
-        self.relation_text = self.relation_descs['description'].values
-        self.get_entity_features()
-        self.write_to_npy(self.entity_feat, 'entity_features.npy')
-        self.write_to_npy(self.relation_feat, 'relation_features.npy')
-
         # read data
         self.train_hrt = self.read_triples(self.dataset_info['train'])
         self.valid_hrt = self.read_triples(self.dataset_info['dev'])
@@ -147,6 +165,14 @@ class ProcessWordNet(object):
         self.train_hrt = np.asarray(self.replace_hrt(self.train_hrt, to_replace_dct).values, dtype=np.int)
         self.valid_hrt = np.asarray(self.replace_hrt(self.valid_hrt, to_replace_dct).values, dtype=np.int)
         self.test_hrt = np.asarray(self.replace_hrt(self.test_hrt, to_replace_dct).values, dtype=np.int)
+
+        self.entity_descs, self.relation_descs = self.read_descriptions(ent_mapping=self.entity2id, rel_mapping=self.relation2id)
+        self.entity_text = self.entity_descs['description'].values
+        self.relation_text = self.relation_descs['description'].values
+
+        self.get_entity_features()
+        self.write_to_npy(self.entity_feat, 'entity_features.npy')
+        self.write_to_npy(self.relation_feat, 'relation_features.npy')
 
         with open(os.path.join(self.data_dir, 'processed', 'ent2id.pkl'), 'wb') as fp:
             pickle.dump(self.entity2id, fp)
@@ -175,7 +201,7 @@ class ProcessWordNet(object):
         self.entity_feat = self.load_from_npy('entity_features.npy')
         self.relation_feat = self.load_from_npy('relation_features.npy')
 
-        entity_descs, relation_descs = self.read_descriptions()
+        entity_descs, relation_descs = self.read_descriptions(ent_mapping=self.entity2id, rel_mapping=self.relation2id)
         self.entity_text = entity_descs['description'].values
         self.relation_text = relation_descs['description'].values
 
@@ -184,34 +210,37 @@ class ProcessWordNet(object):
         # for idx, wn_id in enumerate(self.entity_descs['code'].values):
         #     self.entity2id[wn_id] = idx
 
-        self.entity2id = defaultdict(int)
-        # train_ent = set(self.train_hrt['h'].values)
-        # train_ent.update(set(self.train_hrt['t'].values))
-        # idx = 0
-        # for wn_id in train_ent:
-        #     if wn_id not in self.entity2id:
-        #         self.entity2id[wn_id] = idx
-        #         idx += 1
-        #
-        # dev_ent = set(self.valid_hrt['h'].values)
-        # dev_ent.update(self.valid_hrt['t'].values)
-        # for wn_id in dev_ent:
-        #     if wn_id not in self.entity2id:
-        #         self.entity2id[wn_id] = idx
-        #         idx += 1
-        #
-        # test_ent = set(self.test_hrt['h'].values)
-        # test_ent.update(self.test_hrt['t'].values)
-        # for wn_id in test_ent:
-        #     if wn_id not in self.entity2id:
-        #         self.entity2id[wn_id] = idx
-        #         idx += 1
-        for idx, wn_id in enumerate(self.entity_descs['code'].values):
-            self.entity2id[wn_id] = idx
+        self.entity2id = dict()
+        train_ent = set(self.train_hrt['h'].values)
+        train_ent.update(set(self.train_hrt['t'].values))
+        idx = 0
+        for wn_id in train_ent:
+            if wn_id not in self.entity2id:
+                self.entity2id[wn_id] = idx
+                idx += 1
 
-        self.relation2id = defaultdict(int)
-        for idx, wn_id in enumerate(self.relation_descs['code'].values):
-            self.relation2id[wn_id] = idx
+        dev_ent = set(self.valid_hrt['h'].values)
+        dev_ent.update(self.valid_hrt['t'].values)
+        for wn_id in dev_ent:
+            if wn_id not in self.entity2id:
+                self.entity2id[wn_id] = idx
+                idx += 1
+
+        test_ent = set(self.test_hrt['h'].values)
+        test_ent.update(self.test_hrt['t'].values)
+        for wn_id in test_ent:
+            if wn_id not in self.entity2id:
+                self.entity2id[wn_id] = idx
+                idx += 1
+        # for idx, wn_id in enumerate(self.entity_descs['code'].values):
+        #     self.entity2id[wn_id] = idx
+        self.relation2id = dict()
+        train_rels = set(self.train_hrt['r'].values)
+        idx = 0
+        for wn_id in train_rels:
+            if wn_id not in self.relation2id:
+                self.relation2id[wn_id] = idx
+                idx += 1
 
         # import IPython;IPython.embed()s
 
