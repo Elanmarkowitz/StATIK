@@ -234,6 +234,7 @@ class KGCompletionGNN(nn.Module):
 
         self.classify_triple = TripleClassificationLayer(self.embed_dim)
         self.transE_decoder = TransEDecoder(num_relations, self.embed_dim)
+        self.encoder_combination_layer = nn.Linear(2*self.embed_dim, self.embed_dim)
         # self.conv_decoder = ConvolutionDecoder(embed_dim)
 
         self.act = nn.LeakyReLU()
@@ -271,27 +272,30 @@ class KGCompletionGNN(nn.Module):
         if self.encoder == "ours_sequential":
             entity_feat[query_nodes] = language_embedding
 
-        H_0 = self.entity_input_transform2(self.dropout(entity_feat))
-        H_0 = self.norm_entity(H_0)
-        H = H_0
-        #
-        # Transform relations
-        r_embed = self.relation_embedding(r_tensor)
-        r_direction_embed = self.relative_direction_embedding(r_relative)
-        E_0 = self.act(self.edge_input_transform(r_embed))
-        E_0 = self.norm_edge(E_0)
-        E = E_0 + r_direction_embed
+        if self.encoder in ['ours_parallel', 'our_sequential']:
 
-        for i in range(self.num_layers):
-            H = self.dropout(self.message_passing_layers[i](H, E, ht))
-            E = self.edge_update_layers[i](H, E, ht)
+            H_0 = self.entity_input_transform2(self.dropout(entity_feat))
+            H_0 = self.norm_entity(H_0)
+            H = H_0
+            #
+            # Transform relations
+            r_embed = self.relation_embedding(r_tensor)
+            r_direction_embed = self.relative_direction_embedding(r_relative)
+            E_0 = self.act(self.edge_input_transform(r_embed))
+            E_0 = self.norm_edge(E_0)
+            E = E_0 + r_direction_embed
+
+            for i in range(self.num_layers):
+                H = self.dropout(self.message_passing_layers[i](H, E, ht))
+                E = self.edge_update_layers[i](H, E, ht)
 
         # final_embeddings = 0.5*H[query_nodes] + 0.5*H_0[query_nodes]  # TODO: look at pooling of message passing
 
         if self.encoder == "ours_sequential":
             final_embeddings = H[query_nodes]
         elif self.encoder == "ours_parallel":
-            final_embeddings = H[query_nodes] + self.entity_input_transform(language_embedding)
+            catted_embeds = torch.cat([H[query_nodes], self.entity_input_transform(language_embedding)], dim=-1)
+            final_embeddings = self.encoder_combination_layer(self.act(catted_embeds))
         elif self.encoder == "BLP":
             final_embeddings = self.entity_input_transform(language_embedding)
         elif self.encoder == 'StAR':
