@@ -166,12 +166,12 @@ class TokenizerLoadingFunction:
 class TrainingCollateFunction:
     def __init__(self, dataset: KGLoadableDataset, max_neighbors, num_negatives, encoder_method):
         self.tokenizer_loading_fn = TokenizerLoadingFunction(BertTokenizer.from_pretrained('bert-base-cased'),
-                                                             entity_text=dataset.base_dataset.entity_text,
-                                                             relation_text=dataset.base_dataset.relation_text,
+                                                             entity_text=dataset.base_ds.entity_text,
+                                                             relation_text=dataset.base_ds.relation_text,
                                                              method=encoder_method)
         self.message_passing_loading_fn = MessagePassingLoadingFunction(dataset.graph, max_neighbors=max_neighbors)
         self.num_negatives = num_negatives
-        self.num_relations = dataset.base_dataset.num_relations
+        self.num_relations = dataset.base_ds.num_relations
         self.training_entities = dataset.graph.present_entities
 
     def __call__(self, batch):
@@ -242,8 +242,8 @@ class TrainingCollateFunction:
 class InferenceCollateTargetFunction:
     def __init__(self, dataset: KGInferenceDataset, max_neighbors, encoder_method):
         self.tokenizer_loading_fn = TokenizerLoadingFunction(BertTokenizer.from_pretrained('bert-base-cased'),
-                                                             entity_text=dataset.base_dataset.entity_text,
-                                                             relation_text=dataset.base_dataset.relation_text,
+                                                             entity_text=dataset.base_ds.entity_text,
+                                                             relation_text=dataset.base_ds.relation_text,
                                                              method=encoder_method)
         self.message_passing_loading_fn = MessagePassingLoadingFunction(dataset.graph, max_neighbors=max_neighbors)
 
@@ -264,11 +264,11 @@ class InferenceCollateTargetFunction:
 class InferenceCollateQueryFunction:
     def __init__(self, dataset: KGInferenceDataset, max_neighbors, head_prediction: bool, encoder_method):
         self.tokenizer_loading_fn = TokenizerLoadingFunction(BertTokenizer.from_pretrained('bert-base-cased'),
-                                                             entity_text=dataset.base_dataset.entity_text,
-                                                             relation_text=dataset.base_dataset.relation_text,
+                                                             entity_text=dataset.base_ds.entity_text,
+                                                             relation_text=dataset.base_ds.relation_text,
                                                              method=encoder_method)
         self.message_passing_loading_fn = MessagePassingLoadingFunction(dataset.graph, max_neighbors=max_neighbors)
-        self.num_relations = dataset.base_dataset.num_relations
+        self.num_relations = dataset.base_ds.num_relations
         self.head_prediction = head_prediction
 
     def __call__(self, batch):
@@ -276,7 +276,7 @@ class InferenceCollateQueryFunction:
             filter_mask = [mask for _, mask, _ in batch]
         else:
             filter_mask = [mask for _, _, mask, in batch]
-        filter_mask = torch.from_numpy(np.stack(filter_mask, axis=0))
+        filter_mask = torch.from_numpy(np.stack(filter_mask, axis=0)) if filter_mask[0] is not None else None
         to_tokenizer = self._prepare_for_tokenizer(batch)
         to_mp_loader = self._prepare_for_mp_loader(batch)
         input_ids, token_type_ids, attention_mask = self.tokenizer_loading_fn(to_tokenizer)

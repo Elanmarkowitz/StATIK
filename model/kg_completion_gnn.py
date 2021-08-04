@@ -206,6 +206,9 @@ class KGCompletionGNN(nn.Module):
         self.dropout = nn.Dropout(p=config.dropout)
         self._encode_only = False
 
+        self.act = nn.LeakyReLU()
+        self.softmax = nn.Softmax(dim=0)
+
         self.language_transformer = AutoModel.from_pretrained(self.language_model)
 
         self.relation_embedding = nn.Embedding(num_relations, input_dim)
@@ -234,11 +237,12 @@ class KGCompletionGNN(nn.Module):
 
         self.classify_triple = TripleClassificationLayer(self.embed_dim)
         self.transE_decoder = TransEDecoder(num_relations, self.embed_dim)
-        self.encoder_combination_layer = nn.Linear(2*self.embed_dim, self.embed_dim)
+        self.language_layer_norm = nn.LayerNorm(self.embed_dim)
+        self.mp_layer_norm = nn.LayerNorm(self.embed_dim)
+        self.encoder_combination_layer = nn.Sequential(nn.Linear(2*self.embed_dim, self.embed_dim*10),
+                                                       self.act,
+                                                       nn.Linear(self.embed_dim*10, self.embed_dim))
         # self.conv_decoder = ConvolutionDecoder(embed_dim)
-
-        self.act = nn.LeakyReLU()
-        self.softmax = nn.Softmax(dim=0)
 
     def encode_only(self, val: bool):
         self._encode_only = val
@@ -294,8 +298,9 @@ class KGCompletionGNN(nn.Module):
         if self.encoder == "ours_sequential":
             final_embeddings = H[query_nodes]
         elif self.encoder == "ours_parallel":
-            catted_embeds = torch.cat([H[query_nodes], self.entity_input_transform(language_embedding)], dim=-1)
-            final_embeddings = self.encoder_combination_layer(self.act(catted_embeds))
+            # catted_embeds = torch.cat([H[query_nodes], self.entity_input_transform(language_embedding)], dim=-1)
+            # final_embeddings = self.encoder_combination_layer(self.act(catted_embeds))
+            final_embeddings = self.mp_layer_norm(H[query_nodes]) + self.language_layer_norm(self.entity_input_transform(language_embedding))
         elif self.encoder == "BLP":
             final_embeddings = self.entity_input_transform(language_embedding)
         elif self.encoder == 'StAR':

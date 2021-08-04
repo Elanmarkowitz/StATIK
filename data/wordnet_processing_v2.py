@@ -8,7 +8,10 @@ import pickle
 
 from collections import defaultdict
 import json
+
+import torch
 from sentence_transformers import SentenceTransformer
+from tqdm import tqdm
 from transformers import BertTokenizer, BertModel, FeatureExtractionPipeline
 
 import urllib.request
@@ -93,9 +96,9 @@ class ProcessWordNet(object):
     def read_descriptions(self, ent_mapping: dict = None, rel_mapping: dict = None):
 
         ent_desc = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['ent_desc']),
-                               names=['code', 'description'], sep='\t')
+                               names=['code', 'description'], sep='\t', dtype=str)
         rel_desc = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['rel_desc']),
-                               names=['code', 'description'], sep='\t')
+                               names=['code', 'description'], sep='\t', dtype=str)
 
         ent_desc['description'] = self._simplify_text_data(ent_desc['description'])
         rel_desc['description'] = self._simplify_text_data(rel_desc['description'])
@@ -108,7 +111,7 @@ class ProcessWordNet(object):
 
         if 'ent_desc2' in self.dataset_info:
             ent_desc2 = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['ent_desc2']),
-                                    names=['code', 'description'], sep='\t')
+                                    names=['code', 'description'], sep='\t', dtype=str, keep_default_na=False)
             ent_desc2['description'] = self._simplify_text_data(ent_desc2['description'])
             ent_desc2['id'] = ent_desc2['code'].map(lambda x: ent_mapping.get(x, -1))
             ent_desc2 = ent_desc2[ent_desc2['id'] != -1]
@@ -120,8 +123,13 @@ class ProcessWordNet(object):
 
         ent_desc = ent_desc.sort_values(by='id', axis='index')
         rel_desc = rel_desc.sort_values(by='id', axis='index')
+        self.entity_descs = ent_desc
+        self.relation_descs = rel_desc
 
-        return ent_desc, rel_desc
+        self.entity_text = np.array([f'Unknown {i}' for i in range(self.num_entities)])
+        self.relation_text = np.array([f'Unknown {i}' for i in range(self.num_relations)])
+        self.entity_text[self.entity_descs['id'].values] = self.entity_descs['description'].values
+        self.relation_text[self.relation_descs['id'].values] = self.relation_descs['description'].values
 
     @staticmethod
     def _simplify_text_data(data: pd.Series):
@@ -166,12 +174,10 @@ class ProcessWordNet(object):
         self.valid_hrt = np.asarray(self.replace_hrt(self.valid_hrt, to_replace_dct).values, dtype=np.int)
         self.test_hrt = np.asarray(self.replace_hrt(self.test_hrt, to_replace_dct).values, dtype=np.int)
 
-        self.entity_descs, self.relation_descs = self.read_descriptions(ent_mapping=self.entity2id, rel_mapping=self.relation2id)
-        self.entity_text = self.entity_descs['description'].values
-        self.relation_text = self.relation_descs['description'].values
+        self.read_descriptions(ent_mapping=self.entity2id, rel_mapping=self.relation2id)
 
         self.get_entity_features()
-        self.write_to_npy(self.entity_feat, 'entity_features.npy')
+        self.write_to_npy(self.entity_feat.astype(np.float16), 'entity_features.npy')
         self.write_to_npy(self.relation_feat, 'relation_features.npy')
 
         with open(os.path.join(self.data_dir, 'processed', 'ent2id.pkl'), 'wb') as fp:
@@ -201,9 +207,7 @@ class ProcessWordNet(object):
         self.entity_feat = self.load_from_npy('entity_features.npy')
         self.relation_feat = self.load_from_npy('relation_features.npy')
 
-        entity_descs, relation_descs = self.read_descriptions(ent_mapping=self.entity2id, rel_mapping=self.relation2id)
-        self.entity_text = entity_descs['description'].values
-        self.relation_text = relation_descs['description'].values
+        self.read_descriptions(ent_mapping=self.entity2id, rel_mapping=self.relation2id)
 
     def create_symbols_to_id(self):
         # self.entity2id = defaultdict(int)
@@ -244,16 +248,26 @@ class ProcessWordNet(object):
 
         # import IPython;IPython.embed()s
 
+    @torch.no_grad()
     def get_entity_features(self):
+        BATCH_SIZE = 128 * torch.cuda.device_count()
         print('Creating features using language model.')
         # if self.dataset_info['dataset'] == 'FB15k-237':
         tokenizer = BertTokenizer.from_pretrained('bert-base-cased')
         model = BertModel.from_pretrained('bert-base-cased')
+        dp_model = torch.nn.DataParallel(model)
         pipeline = FeatureExtractionPipeline(model, tokenizer, device=0)
-        self.entity_feat = np.array([np.array(pipeline(e))[0,0,:].flatten()
-                                     for e in self.entity_descs['description'].apply(ProcessWordNet.get_first_n_words).values])
-        self.relation_feat = np.array([np.array(pipeline(e))[0,0,:].flatten()
-                                       for e in self.relation_descs['description'].apply(ProcessWordNet.get_first_n_words).values])
+
+        self.entity_feat = np.zeros((self.num_entities, 768), dtype=np.float)
+        assert len(self.entity_feat) == len(self.entity_text)
+        for i in tqdm(range(0, self.num_entities, BATCH_SIZE)):
+            batch_slice = slice(i, i + BATCH_SIZE)
+            batch = [self.get_first_n_words(desc) for desc in self.entity_text[batch_slice].tolist()]
+            inputs = tokenizer(batch, padding=True, return_tensors='pt')
+            self.entity_feat[batch_slice] = dp_model(**inputs)[0][:,0,:].cpu().numpy()
+
+        self.relation_feat = np.array([np.array(pipeline(self.get_first_n_words(e)))[0,0,:].flatten()
+                                       for e in self.relation_text])
         # else:
         # model = SentenceTransformer('stsb-distilroberta-base-v2')
         # self.entity_feat = model.encode(self.entity_descs['description'].apply(ProcessWordNet.get_first_n_words).values)
