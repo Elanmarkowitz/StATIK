@@ -1,9 +1,7 @@
 import inspect
-import numpy as np
 
 import torch
 import torch.nn.functional as F
-import math
 from torch import nn
 from torch import Tensor
 from transformers import AutoModel
@@ -144,50 +142,6 @@ class EdgeUpdateLayer(nn.Module):
         out = self.norm(edge_update + E)
         return out
 
-
-class RelationCorrelationModel(nn.Module):
-    def __init__(self, num_relations: int, embed_dim: int):
-        super(RelationCorrelationModel, self).__init__()
-        self.relation_correlation_embedding = nn.Embedding(num_relations, embed_dim)
-        self.ht_transform = nn.Linear(embed_dim, embed_dim)
-        self.hh_transform = nn.Linear(embed_dim, embed_dim)
-        self.th_transform = nn.Linear(embed_dim, embed_dim)
-        self.tt_transform = nn.Linear(embed_dim, embed_dim)
-        self.correlation_weight_table = nn.Parameter(torch.ones(num_relations, num_relations).float())
-        self.final_embedding = nn.Linear(2 * embed_dim, embed_dim)
-        self.final_score = nn.Linear(embed_dim, 1)
-
-    def forward(self, ht: Tensor, r_q: Tensor, r_tensor: Tensor, r_relative: Tensor, h_or_t_sample: Tensor,
-                queries: Tensor, num_nodes: int):
-        r_corr_embed = self.relation_correlation_embedding(r_tensor)
-        r_corr_embed = r_corr_embed * torch.sigmoid(self.correlation_weight_table[r_tensor, r_q]).view(-1, 1)
-
-        # compute the relation embedding for all topologies
-        hh_embed = self.hh_transform(r_corr_embed)
-        ht_embed = self.ht_transform(r_corr_embed)
-        th_embed = self.th_transform(r_corr_embed)
-        tt_embed = self.tt_transform(r_corr_embed)
-        all_embed = torch.stack([torch.stack([tt_embed, th_embed]), torch.stack([ht_embed, hh_embed])])
-
-        # select the topology present
-        selected_embed = all_embed[r_relative, h_or_t_sample, torch.arange(r_relative.shape[0])]
-
-        # query relationship does not pass information
-        selected_embed = selected_embed * torch.logical_not(queries).float().view(-1, 1)
-
-        aggregated_to_nodes = MessagePassingLayer.aggregate_messages(ht, selected_embed, selected_embed, num_nodes)
-
-        query_idx = queries.nonzero().flatten()
-        query_entities = ht[query_idx]
-        query_r_type = r_tensor[query_idx]
-
-        aggregated_to_query = aggregated_to_nodes[query_entities[:, 0]] + aggregated_to_nodes[query_entities[:, 1]]
-
-        final_query_embedding = self.final_embedding(torch.cat([aggregated_to_query, self.relation_correlation_embedding(query_r_type)], dim=1))
-
-        return self.final_score(final_query_embedding)
-
-
 class KGCompletionGNN(nn.Module):
     def __init__(self, relation_feat, num_relations: int, input_dim: int, config: ModelConfig):
         super(KGCompletionGNN, self).__init__()
@@ -230,12 +184,9 @@ class KGCompletionGNN(nn.Module):
             self.message_passing_layers.append(MessagePassingLayer(self.embed_dim))
             self.edge_update_layers.append(EdgeUpdateLayer(self.embed_dim))
 
-        self.relation_correlation_model = RelationCorrelationModel(num_relations, self.embed_dim)
-
         self.classify_triple = TripleClassificationLayer(self.embed_dim)
         self.transE_decoder = TransEDecoder(num_relations, self.embed_dim)
         self.encoder_combination_layer = nn.Linear(2*self.embed_dim, self.embed_dim)
-        # self.conv_decoder = ConvolutionDecoder(embed_dim)
 
         self.act = nn.LeakyReLU()
         self.softmax = nn.Softmax(dim=0)
@@ -341,15 +292,6 @@ class KGCompletionGNN(nn.Module):
         elif self.decoder == "MLP+TransE":
             self.margin = margin
             return self.combo_loss
-        elif self.decoder == "MLP+Conv":
-            self.margin = margin
-            return self.combo_loss
-        elif self.decoder == "RelCorr+TransE":
-            self.margin = margin
-            return self.margin_ranking_loss
-        elif self.decoder == "RelCorr+MLP":
-            self.margin = margin
-            return self.margin_ranking_loss
         else:
             Exception(f"Loss function not known for {self.decoder}")
 
@@ -444,52 +386,3 @@ class TransEDecoder(nn.Module):
         tail_embeds = F.normalize(tail_embeds, p=2, dim=-1)
         distances = torch.norm(head_embeds + relation_embeds - tail_embeds, p=p, dim=-1)
         return distances
-
-
-class ConvolutionDecoder(nn.Module):
-    def __init__(self, embed_dim, channels_1=32, channels_2=16, kernel_size=3, height_dim=32, dropout=0.2):
-        super(ConvolutionDecoder, self).__init__()
-        self.embed_dim = embed_dim
-        self.height_dim = height_dim
-        self.channels_1 = channels_1
-        self.channels_2 = channels_2
-        self.kernel_size = kernel_size
-
-        assert embed_dim % height_dim == 0, '{} does not divide {} without remainder'.format(height_dim, embed_dim)
-
-        self.width_dim = int(self.embed_dim / self.height_dim)
-        self.out_height = self.height_dim + 3 * (1 - self.kernel_size)
-        self.out_width = self.width_dim + 3 * (1 - self.kernel_size)
-
-        self.conv1 = nn.Conv2d(3, self.channels_1, kernel_size=(self.kernel_size, self.kernel_size))
-        self.conv2 = nn.Conv2d(self.channels_1, self.channels_2, kernel_size=(self.kernel_size, self.kernel_size))
-        self.conv3 = nn.Conv2d(self.channels_2, 1, kernel_size=(self.kernel_size, self.kernel_size))
-        self.output = nn.Linear(self.out_height * self.out_width, 1)
-        self.drop2d = nn.Dropout2d(p=dropout)
-        self.drop = nn.Dropout(p=dropout)
-
-        self.act = nn.ReLU()
-
-    def forward(self, H, E, ht, queries):
-        query_idxs = queries.nonzero().flatten()
-
-        ht_q = ht[query_idxs]
-        head_embs = H[ht_q[:, 0]].reshape(-1, self.height_dim, self.width_dim)
-        tail_embs = H[ht_q[:, 1]].reshape(-1, self.height_dim, self.width_dim)
-        relation_embs = E[query_idxs].reshape(-1, self.height_dim, self.width_dim)
-
-        hrt_signal = torch.stack([head_embs, relation_embs, tail_embs], dim=1)
-        hrt_signal = self.drop2d(hrt_signal)
-        x = self.conv1(hrt_signal)
-        x = self.act(x)
-        x = self.drop2d(x)
-        x = self.conv2(x)
-        x = self.act(x)
-        x = self.drop2d(x)
-        x = self.conv3(x)
-        x = self.act(x)
-        x = self.drop(x)
-        x = x.reshape(x.shape[0], -1)
-        x = self.output(x)
-
-        return x
