@@ -8,6 +8,7 @@ import tqdm
 from ogb.lsc import WikiKG90MDataset
 
 from data.left_contiguous_csr import LeftContiguousCSR
+from data.wikidata5m_processing_v2 import ProcessWikidata5M
 from data.wordnet_processing_v2 import ProcessWordNet
 from data.fb15k_processing_v2 import ProcessFreebase
 
@@ -17,10 +18,11 @@ DATA_DIR = os.environ["DATA_DIR"] if "DATA_DIR" in os.environ else "/data/elanma
 LEGAL_DATASETS = {
     "wikikg90m_kddcup2021",
     "FB15k-237",
-    "WN18RR"
+    "WN18RR",
+    "Wikidata5M"
 }
 
-ProcessableDataset = Union[WikiKG90MDataset, ProcessWordNet, ProcessFreebase]
+ProcessableDataset = Union[WikiKG90MDataset, ProcessWordNet, ProcessFreebase, ProcessWikidata5M]
 
 
 def load_original_data(root_data_dir: str, dataset_name: str) -> ProcessableDataset:
@@ -32,6 +34,8 @@ def load_original_data(root_data_dir: str, dataset_name: str) -> ProcessableData
         return ProcessWordNet(root_data_dir=root_data_dir)
     elif dataset_name == "FB15k-237":
         return ProcessFreebase(root_data_dir=root_data_dir)
+    elif dataset_name == "Wikidata5M":
+        return ProcessWikidata5M(root_data_dir=root_data_dir)
     else:
         raise Exception('Dataset not known.')
 
@@ -56,12 +60,14 @@ def get_filtered_candidate_with_lccsr(queries, edge_lccsr, relation_lccsr, num_e
     return candidate_filter
 
 
-def process_data(root_data_dir: str, dataset_name: str) -> None:
+def process_data(root_data_dir: str, dataset_name: str, transfer_setting=False) -> None:
     print('Loading original data.')
     dataset = load_original_data(root_data_dir, dataset_name)
     save_dir = os.path.join(root_data_dir, dataset_name, "processed")
 
     train_hrt = dataset.train_hrt
+    valid_hrt = dataset.valid_hrt
+    test_hrt = dataset.test_hrt
 
     def create_lccsr(num_entities, num_edges, hs, rs, ts, r_invs):
         # dictionary of edges
@@ -102,9 +108,11 @@ def process_data(root_data_dir: str, dataset_name: str) -> None:
         edge_lccsr = LeftContiguousCSR(edge_csr_indptr, degrees, edge_csr_data)
         return rel_lccsr, edge_lccsr, degrees, indegrees, outdegrees
 
-    total_hrt = np.concatenate((dataset.train_hrt, dataset.valid_hrt, dataset.test_hrt), axis=0)
+    train_edges = train_hrt
+    valid_edges = valid_hrt if transfer_setting else np.concatenate((dataset.train_hrt, dataset.valid_hrt))
+    test_edges = test_hrt if transfer_setting else np.concatenate((dataset.train_hrt, dataset.valid_hrt, dataset.test_hrt), axis=0)
     for stage, hrt_group in zip(['train', 'valid', 'test'],
-                                [train_hrt, np.concatenate((dataset.train_hrt, dataset.valid_hrt), axis=0), total_hrt]):
+                                [train_edges, valid_edges, test_edges]):
 
         rel_lccsr, edge_lccsr, degrees, indegrees, outdegrees = create_lccsr(dataset.num_entities, len(hrt_group),
                                                                              hrt_group[:,0], hrt_group[:,1], hrt_group[:,2],
@@ -115,15 +123,51 @@ def process_data(root_data_dir: str, dataset_name: str) -> None:
         np.save(os.path.join(save_dir, f'{stage}_indegrees.npy'), indegrees)
         np.save(os.path.join(save_dir, f'{stage}_outdegrees.npy'), outdegrees)
 
-    full_rel_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, f'test_rel_lccsr.npz'))
-    full_edge_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, f'test_edge_lccsr.npz'))
-    for stage, triples in zip(['train', 'valid', 'test'], [dataset.train_hrt, dataset.valid_hrt, dataset.test_hrt]):
-        h_filter_mask = get_filtered_candidate_with_lccsr(triples[:, [2, 1]], full_edge_lccsr, full_rel_lccsr,
+    train_targets = np.zeros((dataset.num_entities,), dtype=np.bool)
+    train_entities = np.unique(train_hrt[:, [0, 2]])
+    train_targets[train_entities] = 1
+
+    valid_targets = np.zeros((dataset.num_entities,), dtype=np.bool)
+    validation_entities = np.unique(valid_hrt[:, [0, 2]])
+    valid_targets[validation_entities] = 1
+    valid_targets[train_entities] = 0
+    valid_entities = np.nonzero(valid_targets)[0]
+
+    test_targets = np.zeros((dataset.num_entities,), dtype=np.bool)
+    test_entities = np.unique(test_hrt[:, [0, 2]])
+    test_targets[test_entities] = 1
+    test_targets[train_entities] = 0
+    test_targets[valid_entities] = 0
+    test_entities = np.nonzero(test_targets)[0]
+
+    if not transfer_setting:
+        valid_targets = np.logical_or(train_targets, valid_targets)
+        test_targets = np.logical_or(valid_targets, test_targets)
+
+    np.save(os.path.join(save_dir, 'train_entities.npy'), train_entities)
+    np.save(os.path.join(save_dir, 'valid_entities.npy'), valid_entities)
+    np.save(os.path.join(save_dir, 'test_entities.npy'), test_entities)
+    np.save(os.path.join(save_dir, 'train_targets.npy'), train_targets)
+    np.save(os.path.join(save_dir, 'valid_targets.npy'), valid_targets)
+    np.save(os.path.join(save_dir, 'test_targets.npy'), test_targets)
+
+    for stage, triples, targets in zip(['train', 'valid', 'test'],
+                                       [dataset.train_hrt, dataset.valid_hrt, dataset.test_hrt],
+                                       [train_targets, valid_targets, test_targets]):
+        if isinstance(dataset, ProcessWikidata5M) and stage == 'train':
+            continue  # too large of a filter
+        edge_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, f'{stage}_rel_lccsr.npz'))
+        rel_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, f'{stage}_rel_lccsr.npz'))
+        h_filter_mask = get_filtered_candidate_with_lccsr(triples[:, [2, 1]], edge_lccsr, rel_lccsr,
                                                           dataset.num_entities, dataset.num_relations, head_pred=True)
-        t_filter_mask = get_filtered_candidate_with_lccsr(triples[:, [0, 1]], full_edge_lccsr, full_rel_lccsr,
+        t_filter_mask = get_filtered_candidate_with_lccsr(triples[:, [0, 1]], edge_lccsr, rel_lccsr,
                                                           dataset.num_entities, dataset.num_relations, head_pred=False)
+        h_filter_mask = h_filter_mask[:, targets]
+        t_filter_mask = t_filter_mask[:, targets]
         np.save(os.path.join(save_dir, f'{stage}_h_filter.npy'), h_filter_mask)
         np.save(os.path.join(save_dir, f'{stage}_t_filter.npy'), t_filter_mask)
+
+
 
 
 class KGProcessedDataset:
@@ -157,30 +201,26 @@ class KGProcessedDataset:
         self.test_indegrees = np.load(os.path.join(load_dir, 'test_indegrees.npy'))
         self.test_outdegrees = np.load(os.path.join(load_dir, 'valid_outdegrees.npy'))
         self.feature_dim = self.entity_feat.shape[1]
-        self.train_h_filter = np.load(os.path.join(load_dir, 'train_h_filter.npy'))
-        self.train_t_filter = np.load(os.path.join(load_dir, 'train_t_filter.npy'))
-        self.valid_h_filter = np.load(os.path.join(load_dir, 'valid_h_filter.npy'))
-        self.valid_t_filter = np.load(os.path.join(load_dir, 'valid_t_filter.npy'))
-        self.test_h_filter = np.load(os.path.join(load_dir, 'test_h_filter.npy'))
-        self.test_t_filter = np.load(os.path.join(load_dir, 'test_t_filter.npy'))
+        self.train_h_filter = self._load_file_if_present(os.path.join(load_dir, 'train_h_filter.npy'))
+        self.train_t_filter = self._load_file_if_present(os.path.join(load_dir, 'train_t_filter.npy'))
+        self.valid_h_filter = self._load_file_if_present(os.path.join(load_dir, 'valid_h_filter.npy'))
+        self.valid_t_filter = self._load_file_if_present(os.path.join(load_dir, 'valid_t_filter.npy'))
+        self.test_h_filter = self._load_file_if_present(os.path.join(load_dir, 'test_h_filter.npy'))
+        self.test_t_filter = self._load_file_if_present(os.path.join(load_dir, 'test_t_filter.npy'))
 
-        self.train_entities = np.unique(self.train_hrt[:, [0, 2]])
-        entities = np.zeros((self.num_entities,), dtype=np.int32)
-        validation_entities = np.unique(self.valid_hrt[:, [0, 2]])
-        entities[validation_entities] = 1
-        entities[self.train_entities] = 0
-        self.valid_entities = np.nonzero(entities)[0]
-        entities = np.zeros((self.num_entities,), dtype=np.int32)
-        test_entities = np.unique(self.test_hrt[:, [0, 2]])
-        entities[test_entities] = 1
-        entities[self.train_entities] = 0
-        entities[self.valid_entities] = 0
-        self.test_entities = np.nonzero(entities)[0]
+        self.train_entities = np.load(os.path.join(load_dir, 'train_entities.npy'))
+        self.valid_entities = np.load(os.path.join(load_dir, 'valid_entities.npy'))
+        self.test_entities = np.load(os.path.join(load_dir, 'test_entities.npy'))
+        self.train_targets = np.load(os.path.join(load_dir, 'train_targets.npy'))
+        self.valid_targets = np.load(os.path.join(load_dir, 'valid_targets.npy'))
+        self.test_targets = np.load(os.path.join(load_dir, 'test_targets.npy'))
 
-        self.train_h_filter[:, np.concatenate([self.valid_entities, self.test_entities])] = False
-        self.train_t_filter[:, np.concatenate([self.valid_entities, self.test_entities])] = False
-        self.valid_h_filter[:, self.test_entities] = False
-        self.valid_t_filter[:, self.test_entities] = False
+    @staticmethod
+    def _load_file_if_present(filepath):
+        if os.path.isfile(filepath):
+            return np.load(filepath)
+        else:
+            return None
 
 
 def load_processed_data(root_data_dir: str, dataset_name: str) -> KGProcessedDataset:

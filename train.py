@@ -126,6 +126,11 @@ def train(global_rank, local_rank, world):
                                                                head_prediction=False, encoder_method=FLAGS.encoder)
     train_eval_dataset = Subset(train_eval_dataset, eval_queries)  # don't use all queries for mrr calculation
     train_eval_subset = partition_dataset_by_rank(train_eval_dataset, global_rank, world)
+    train_target_dataset = get_training_inference_dataset(dataset).target_mode()
+    train_target_subset = partition_dataset_by_rank(train_target_dataset, global_rank, world)
+    train_target_collate_fn = InferenceCollateTargetFunction(train_target_dataset, FLAGS.samples_per_node, FLAGS.encoder)
+    train_target_dataloader = DataLoader(train_target_subset, batch_size=FLAGS.valid_batch_size,
+                                         num_workers=FLAGS.num_workers, collate_fn=train_target_collate_fn)
     train_eval_dataloader_tail = DataLoader(train_eval_subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
                                             collate_fn=train_eval_collate_fn_tail)
     train_eval_dataloader_head = DataLoader(train_eval_subset, batch_size=FLAGS.valid_batch_size, num_workers=FLAGS.num_workers,
@@ -148,7 +153,7 @@ def train(global_rank, local_rank, world):
 
     model.to(local_rank)
 
-    saved = torch.load('checkpoints/wn18rr_transe_star_best_model.pkl', map_location="cpu")
+    # saved = torch.load('checkpoints/wn18rr_transe_star_best_model.pkl', map_location="cpu")
     # model.load_state_dict(saved['state_dict'], strict=False)
 
     ddp_model = DDP(model, device_ids=[local_rank], process_group=world, find_unused_parameters=True)
@@ -202,21 +207,22 @@ def train(global_rank, local_rank, world):
                           f"Current Loss={loss.detach().cpu().numpy():.5f}")
 
         if (epoch + 1) % FLAGS.validate_every == 0:
-            train_t_res, train_h_res = perform_model_validation(
-                ddp_model, train_eval_dataset, target_dataset, train_eval_dataloader_tail, train_eval_dataloader_head,
-                target_dataloader, global_rank, local_rank, world)
-            if global_rank == 0:
-                mrr_tail = train_t_res['mrr']
-                mrr_head = train_h_res['mrr']
-                mrr = 0.5 * mrr_tail + 0.5 * mrr_head
-                print(f'Train MRR = {mrr}, t_pred MRR = {mrr_tail}, h_pred MRR = {mrr_head}')
+            if FLAGS.dataset != "Wikidata5M":
+                train_t_res, train_h_res = perform_model_validation(
+                    ddp_model, train_eval_dataset, train_target_dataset, train_eval_dataloader_tail,
+                    train_eval_dataloader_head, train_target_dataloader, global_rank, local_rank, world)
+                if global_rank == 0:
+                    mrr_tail = train_t_res['mrr_filtered']
+                    mrr_head = train_h_res['mrr_filtered']
+                    mrr = 0.5 * mrr_tail + 0.5 * mrr_head
+                    print(f'Train MRR = {mrr}, t_pred MRR = {mrr_tail}, h_pred MRR = {mrr_head}')
 
             valid_t_res, valid_h_res = perform_model_validation(
                 ddp_model, valid_dataset, target_dataset, valid_dataloader_tail, valid_dataloader_head,
                 target_dataloader, global_rank, local_rank, world)
             if global_rank == 0:
-                mrr_tail = valid_t_res['mrr']
-                mrr_head = valid_h_res['mrr']
+                mrr_tail = valid_t_res['mrr_filtered']
+                mrr_head = valid_h_res['mrr_filtered']
                 mrr = 0.5 * mrr_tail + 0.5 * mrr_head
                 if mrr > max_mrr:
                     max_mrr = mrr
@@ -330,7 +336,7 @@ def run_inference(dataset: KGInferenceDataset, dataloader: DataLoader, target_lo
         model.module.encode_only(True)
         target_embeds = []
         for i, batch in enumerate(target_loader):
-            batch = prepare_batch_for_model(batch, dataset.base_dataset)
+            batch = prepare_batch_for_model(batch, dataset.base_ds)
             batch = move_batch_to_device(batch, local_rank)
             input_ids, token_type_ids, attention_mask, ht_tensor, r_tensor, r_query, entity_set, entity_feat, query_nodes, r_relatives, is_head_prediction = batch
             batch_target_embeds = model(input_ids, token_type_ids, attention_mask, ht_tensor, r_tensor, r_query,
@@ -346,7 +352,7 @@ def run_inference(dataset: KGInferenceDataset, dataloader: DataLoader, target_lo
     with torch.no_grad():
         model.module.encode_only(False)
         for i, (batch, true_target, target_filter_mask) in enumerate(dataloader):
-            batch = prepare_batch_for_model(batch, dataset.base_dataset)
+            batch = prepare_batch_for_model(batch, dataset.base_ds)
             batch = move_batch_to_device(batch, local_rank)
             input_ids, token_type_ids, attention_mask, ht_tensor, r_tensor, r_query, entity_set, entity_feat, query_nodes, r_relatives, is_head_prediction = batch
             pos_scores, neg_scores = model(input_ids, token_type_ids, attention_mask, ht_tensor, r_tensor, r_query,
@@ -354,7 +360,7 @@ def run_inference(dataset: KGInferenceDataset, dataloader: DataLoader, target_lo
                                            queries=torch.logical_not(true_target), target_embeddings=full_target_embeds)
             full_pos_scores.append(pos_scores.cpu())
             full_target_scores.append(neg_scores.cpu())
-            full_filter_masks.append(target_filter_mask.cpu())
+            full_filter_masks.append(target_filter_mask)
 
             if num_batches and num_batches == (i + 1):
                 break
@@ -480,7 +486,7 @@ def gather_results(data: torch.Tensor, global_rank, local_rank, gather_sizes, wo
     result = torch.cat(gather_list, dim=0)
     if all_gather:
         dist.broadcast(result, 0)
-
+    dist.barrier()
     return result
 
 

@@ -18,6 +18,7 @@ class ModelConfig:
         self.embed_dim = FLAGS.embed_dim
         self.language_model = FLAGS.language_model
         self.dropout = FLAGS.dropout
+        self.train_through_relation_feat = False
 
 
 class MessageCalculationLayer(nn.Module):
@@ -160,12 +161,16 @@ class KGCompletionGNN(nn.Module):
         self.dropout = nn.Dropout(p=config.dropout)
         self._encode_only = False
 
+        self.act = nn.LeakyReLU()
+        self.softmax = nn.Softmax(dim=0)
+
         self.language_transformer = AutoModel.from_pretrained(self.language_model)
 
         self.relation_embedding = nn.Embedding(num_relations, input_dim)
         if relation_feat is not None:
             self.relation_embedding.weight = nn.Parameter(torch.tensor(relation_feat, dtype=torch.float))
-        self.relation_embedding.weight.requires_grad = False   # Comment to learn through message passing relation embedding table
+        if not config.train_through_relation_feat:
+            self.relation_embedding.weight.requires_grad = False   # Comment to learn through message passing relation embedding table
         self.relative_direction_embedding = nn.Embedding(2, self.embed_dim)
         self.head_or_tail_edge_embedding = nn.Embedding(2, self.embed_dim)
 
@@ -186,10 +191,12 @@ class KGCompletionGNN(nn.Module):
 
         self.classify_triple = TripleClassificationLayer(self.embed_dim)
         self.transE_decoder = TransEDecoder(num_relations, self.embed_dim)
-        self.encoder_combination_layer = nn.Linear(2*self.embed_dim, self.embed_dim)
-
-        self.act = nn.LeakyReLU()
-        self.softmax = nn.Softmax(dim=0)
+        self.language_layer_norm = nn.LayerNorm(self.embed_dim)
+        self.mp_layer_norm = nn.LayerNorm(self.embed_dim)
+        self.encoder_combination_layer = nn.Sequential(nn.Linear(2*self.embed_dim, self.embed_dim*10),
+                                                       self.act,
+                                                       nn.Linear(self.embed_dim*10, self.embed_dim))
+        # self.conv_decoder = ConvolutionDecoder(embed_dim)
 
     def encode_only(self, val: bool):
         self._encode_only = val
@@ -223,7 +230,7 @@ class KGCompletionGNN(nn.Module):
         if self.encoder == "ours_sequential":
             entity_feat[query_nodes] = language_embedding
 
-        if self.encoder in ['ours_parallel', 'our_sequential']:
+        if self.encoder in ['ours_parallel', 'ours_sequential']:
 
             H_0 = self.entity_input_transform2(self.dropout(entity_feat))
             H_0 = self.norm_entity(H_0)
@@ -245,8 +252,12 @@ class KGCompletionGNN(nn.Module):
         if self.encoder == "ours_sequential":
             final_embeddings = H[query_nodes]
         elif self.encoder == "ours_parallel":
-            catted_embeds = torch.cat([H[query_nodes], self.entity_input_transform(language_embedding)], dim=-1)
-            final_embeddings = self.encoder_combination_layer(self.act(catted_embeds))
+            # catted_embeds = torch.cat([H[query_nodes],
+            #                           self.entity_input_transform(language_embedding)], dim=-1)
+            # final_embeddings = self.encoder_combination_layer(self.act(catted_embeds))
+            # final_embeddings = self.mp_layer_norm(H[query_nodes]) + self.language_layer_norm(self.entity_input_transform(language_embedding))
+            # final_embeddings = F.normalize(H[query_nodes]) + F.normalize(self.entity_input_transform(language_embedding))
+            final_embeddings = H[query_nodes] + self.entity_input_transform(language_embedding)
         elif self.encoder == "BLP":
             final_embeddings = self.entity_input_transform(language_embedding)
         elif self.encoder == 'StAR':

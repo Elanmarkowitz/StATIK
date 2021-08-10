@@ -33,7 +33,7 @@ class KGBaseDataset:
 
 class KGLoadableDataset(Dataset):
     def __init__(self, base_dataset: KGBaseDataset, graph: KGGraph, hrt: np.ndarray):
-        self.base_dataset = base_dataset
+        self.base_ds = base_dataset
         self.graph = graph
         self.hrt = hrt
 
@@ -49,15 +49,14 @@ class KGLoadableDataset(Dataset):
 class KGInferenceDataset(KGLoadableDataset):
     def __init__(self, base_dataset: KGBaseDataset, graph: KGGraph, hrt: np.ndarray, h_filter, t_filter):
         super(KGInferenceDataset, self).__init__(base_dataset, graph, hrt)
-        self.base_ds = base_dataset
-        self.graph = graph
-        self.hrt = hrt
         self.h_filter = h_filter
         self.t_filter = t_filter
         self.is_query_mode = True
+        self.targets = None
 
-    def target_mode(self):
+    def target_mode(self, targets=None):
         self.is_query_mode = False
+        self.targets = self.graph.present_entities
         return self
 
     def query_mode(self):
@@ -68,15 +67,21 @@ class KGInferenceDataset(KGLoadableDataset):
         if torch.is_tensor(idx):
             idx = idx.tolist()
         if self.is_query_mode:
-            return self.hrt[idx], self.h_filter[idx], self.t_filter[idx]
+            if self.targets is not None:
+                idx = self.targets[idx]
+            h_filter = self.h_filter[idx] if self.h_filter is not None else None
+            t_filter = self.t_filter[idx] if self.t_filter is not None else None
+            return self.hrt[idx], h_filter, t_filter
         else:
             return idx
 
     def __len__(self):
         if self.is_query_mode:
             return len(self.hrt)
+        elif self.targets is not None:
+            return len(self.targets)
         else:
-            return self.base_dataset.num_entities
+            return self.base_ds.num_entities
 
 
 def get_training_dataset(ds: KGProcessedDataset) -> KGLoadableDataset:
@@ -89,7 +94,7 @@ def get_training_dataset(ds: KGProcessedDataset) -> KGLoadableDataset:
 
 def get_training_inference_dataset(ds: KGProcessedDataset) -> KGInferenceDataset:
     base_dataset = KGBaseDataset(ds)
-    present_entities = ds.train_entities
+    present_entities = ds.train_targets.nonzero()[0]
     graph = KGGraph(ds.train_edge_lccsr, ds.train_relation_lccsr, ds.train_degrees, ds.train_indegrees,
                     ds.train_outdegrees, ds.num_relations, present_entities, len(present_entities))
     return KGInferenceDataset(base_dataset, graph, ds.train_hrt, ds.train_h_filter, ds.train_t_filter)
@@ -97,7 +102,7 @@ def get_training_inference_dataset(ds: KGProcessedDataset) -> KGInferenceDataset
 
 def get_validation_dataset(ds: KGProcessedDataset) -> KGInferenceDataset:
     base_dataset = KGBaseDataset(ds)
-    present_entities = np.concatenate([ds.train_entities, ds.valid_entities])
+    present_entities = ds.valid_targets.nonzero()[0]
     graph = KGGraph(ds.valid_edge_lccsr, ds.valid_relation_lccsr, ds.valid_degrees, ds.valid_indegrees,
                     ds.valid_outdegrees, ds.num_relations, present_entities, len(present_entities))
     return KGInferenceDataset(base_dataset, graph, ds.valid_hrt, ds.valid_h_filter, ds.valid_t_filter)
@@ -105,7 +110,7 @@ def get_validation_dataset(ds: KGProcessedDataset) -> KGInferenceDataset:
 
 def get_testing_dataset(ds: KGProcessedDataset) -> KGInferenceDataset:
     base_dataset = KGBaseDataset(ds)
-    present_entities = np.concatenate([ds.train_entities, ds.test_entities])
+    present_entities = ds.test_targets.nonzero()[0]
     graph = KGGraph(ds.test_edge_lccsr, ds.test_relation_lccsr, ds.test_degrees, ds.test_indegrees,
                     ds.test_outdegrees, ds.num_relations, present_entities, len(present_entities))
     return KGInferenceDataset(base_dataset, graph, ds.test_hrt, ds.test_h_filter, ds.test_t_filter)
