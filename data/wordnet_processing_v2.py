@@ -75,7 +75,7 @@ class ProcessWordNet(object):
         tar.close()
 
     def read_triples(self, filename) -> pd.DataFrame:
-        triples = pd.read_csv(os.path.join(self.data_dir, filename), names=['h', 'r', 't'], sep='\t')
+        triples = pd.read_csv(os.path.join(self.data_dir, filename), names=['h', 'r', 't'], sep='\t', dtype=str)
         return triples
 
     @staticmethod
@@ -94,11 +94,10 @@ class ProcessWordNet(object):
         return ' '.join(words[:n])
 
     def read_descriptions(self, ent_mapping: dict = None, rel_mapping: dict = None):
-
         ent_desc = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['ent_desc']),
-                               names=['code', 'description'], sep='\t', dtype=str)
+                               names=['code', 'description'], sep='\t', dtype=str, keep_default_na=False)
         rel_desc = pd.read_csv(os.path.join(self.data_dir, self.dataset_info['rel_desc']),
-                               names=['code', 'description'], sep='\t', dtype=str)
+                               names=['code', 'description'], sep='\t', dtype=str, keep_default_na=False)
 
         ent_desc['description'] = self._simplify_text_data(ent_desc['description'])
         rel_desc['description'] = self._simplify_text_data(rel_desc['description'])
@@ -126,8 +125,8 @@ class ProcessWordNet(object):
         self.entity_descs = ent_desc
         self.relation_descs = rel_desc
 
-        self.entity_text = np.array([f'Unknown {i}' for i in range(self.num_entities)])
-        self.relation_text = np.array([f'Unknown {i}' for i in range(self.num_relations)])
+        self.entity_text = np.array([f'Unknown {i}' for i in range(self.num_entities)], dtype=object)
+        self.relation_text = np.array([f'Unknown {i}' for i in range(self.num_relations)], dtype=object)
         self.entity_text[self.entity_descs['id'].values] = self.entity_descs['description'].values
         self.relation_text[self.relation_descs['id'].values] = self.relation_descs['description'].values
 
