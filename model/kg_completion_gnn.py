@@ -192,6 +192,7 @@ class KGCompletionGNN(nn.Module):
 
         self.mlp_decoder = MLPClassificationLayer(self.embed_dim)
         self.transE_decoder = TransEDecoder(num_relations, self.embed_dim)
+        self.complex_decoder = ComplExDecoder(num_relations, self.embed_dim)
         self.language_layer_norm = nn.LayerNorm(self.embed_dim)
         self.mp_layer_norm = nn.LayerNorm(self.embed_dim)
         self.encoder_combination_layer = nn.Sequential(nn.Linear(2*self.embed_dim, self.embed_dim*10),
@@ -258,7 +259,8 @@ class KGCompletionGNN(nn.Module):
             # final_embeddings = self.encoder_combination_layer(self.act(catted_embeds))
             # final_embeddings = self.mp_layer_norm(H[query_nodes]) + self.language_layer_norm(self.entity_input_transform(language_embedding))
             # final_embeddings = F.normalize(H[query_nodes]) + F.normalize(self.entity_input_transform(language_embedding))
-            final_embeddings = H[query_nodes] + self.entity_input_transform(language_embedding)
+            # final_embeddings = H[query_nodes] + self.entity_input_transform(language_embedding)
+            final_embeddings = self.norm_entity(H[query_nodes]) + self.norm_entity(self.entity_input_transform(language_embedding))
         elif self.encoder == "BLP":
             final_embeddings = self.entity_input_transform(language_embedding)
         elif self.encoder == 'StAR':
@@ -280,6 +282,10 @@ class KGCompletionGNN(nn.Module):
 
         if self.decoder == "TransE":
             pos_scores, neg_scores = self.transE_decoder(query_embeds, positive_target_embeds, negative_target_embeds,
+                                                         r_query, is_head_prediction, add_batch_to_negs=self.training)
+            return pos_scores, neg_scores
+        elif self.decoder == "TransE":
+            pos_scores, neg_scores = self.complex_decoder(query_embeds, positive_target_embeds, negative_target_embeds,
                                                          r_query, is_head_prediction, add_batch_to_negs=self.training)
             return pos_scores, neg_scores
         elif self.decoder == "MLP":
@@ -305,6 +311,9 @@ class KGCompletionGNN(nn.Module):
         if self.decoder == "MLP":
             return nn.BCEWithLogitsLoss()
         elif self.decoder == "TransE":
+            self.margin = margin
+            return self.margin_ranking_loss
+        elif self.decoder == "ComplEx":
             self.margin = margin
             return self.margin_ranking_loss
         elif self.decoder in ["MLP+TransE", "TransE+MLP"]:
@@ -386,6 +395,47 @@ class MLPClassificationLayer(nn.Module):
 class TransEDecoder(nn.Module):
     def __init__(self, num_relations: int, embed_dim: int, distance_norm: int = 1):
         super(TransEDecoder, self).__init__()
+        self.distance_norm = distance_norm
+        self.relation_vector = nn.Embedding(num_relations, embed_dim)
+        nn.init.xavier_uniform_(self.relation_vector.weight.data)
+
+    def forward(self, query_embeds, pos_target_embeds, neg_target_embeds, r_type, is_head_prediction,
+                add_batch_to_negs=False):
+        """
+        :param query_embeds: (Q,d)
+        :param pos_target_embeds: (Q,d)
+        :param neg_target_embeds: (num_negs,d)
+        :param r_type: (Q,)
+        :param is_head_prediction: (Q,) whether the query is associated with a head prediction task (hr->?) vs (tr->?)
+        :param add_batch_to_negs: Whether to use the pos_targets in the batch as negative targets for the rest of the
+                                  batch. Should b used for training only.
+        :return:
+        """
+        relation_embeds = self.relation_vector(r_type)
+
+        head_embeds, tail_embeds, neg_head_embeds, neg_tail_embeds = query_target_to_head_tail(
+            query_embeds, pos_target_embeds, neg_target_embeds, is_head_prediction,
+            add_pos_to_negs=add_batch_to_negs)
+
+        pos_distances = self.distance(head_embeds, relation_embeds, tail_embeds, self.distance_norm)
+
+        relation_embeds = relation_embeds.reshape(-1, 1, relation_embeds.shape[1])  # num queries x 1 x d
+
+        neg_distances = self.distance(neg_head_embeds, relation_embeds, neg_tail_embeds, self.distance_norm)
+
+        return -1*pos_distances, -1*neg_distances
+
+    @staticmethod
+    def distance(head_embeds, relation_embeds, tail_embeds, p):
+        head_embeds = F.normalize(head_embeds, p=2, dim=-1)
+        tail_embeds = F.normalize(tail_embeds, p=2, dim=-1)
+        distances = torch.norm(head_embeds + relation_embeds - tail_embeds, p=p, dim=-1)
+        return distances
+
+
+class ComplExDecoder(nn.Module):
+    def __init__(self, num_relations: int, embed_dim: int, distance_norm: int = 1):
+        super(ComplExDecoder, self).__init__()
         self.distance_norm = distance_norm
         self.relation_vector = nn.Embedding(num_relations, embed_dim)
         nn.init.xavier_uniform_(self.relation_vector.weight.data)
