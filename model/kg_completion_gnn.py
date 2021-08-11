@@ -143,6 +143,7 @@ class EdgeUpdateLayer(nn.Module):
         out = self.norm(edge_update + E)
         return out
 
+
 class KGCompletionGNN(nn.Module):
     def __init__(self, relation_feat, num_relations: int, input_dim: int, config: ModelConfig):
         super(KGCompletionGNN, self).__init__()
@@ -189,7 +190,7 @@ class KGCompletionGNN(nn.Module):
             self.message_passing_layers.append(MessagePassingLayer(self.embed_dim))
             self.edge_update_layers.append(EdgeUpdateLayer(self.embed_dim))
 
-        self.classify_triple = TripleClassificationLayer(self.embed_dim)
+        self.mlp_decoder = MLPClassificationLayer(self.embed_dim)
         self.transE_decoder = TransEDecoder(num_relations, self.embed_dim)
         self.language_layer_norm = nn.LayerNorm(self.embed_dim)
         self.mp_layer_norm = nn.LayerNorm(self.embed_dim)
@@ -261,7 +262,7 @@ class KGCompletionGNN(nn.Module):
         elif self.encoder == "BLP":
             final_embeddings = self.entity_input_transform(language_embedding)
         elif self.encoder == 'StAR':
-            final_embeddings = language_embedding  # TODO: check that this is how they handle
+            final_embeddings = self.entity_input_transform(language_embedding)  # TODO: check that this is how they handle
         else:
             raise Exception(f'Unknown handling of {self.encoder}, check code for issue')
 
@@ -281,16 +282,22 @@ class KGCompletionGNN(nn.Module):
             pos_scores, neg_scores = self.transE_decoder(query_embeds, positive_target_embeds, negative_target_embeds,
                                                          r_query, is_head_prediction, add_batch_to_negs=self.training)
             return pos_scores, neg_scores
-        if self.decoder == "MLP+TransE":
+        elif self.decoder == "MLP":
+            pos_scores, neg_scores = self.mlp_decoder(query_embeds, positive_target_embeds, negative_target_embeds,
+                                                      is_head_prediction, add_batch_to_negs=self.training)
+            return pos_scores, neg_scores
+        elif self.decoder in ["MLP+TransE", "TransE+MLP"]:
             transe_pos_scores, transe_neg_scores = self.transE_decoder(query_embeds, positive_target_embeds,
                                                                        negative_target_embeds, r_query,
                                                                        is_head_prediction, add_batch_to_negs=self.training)
+            mlp_pos_scores, mlp_neg_scores = self.mlp_decoder(query_embeds, positive_target_embeds,
+                                                              negative_target_embeds, is_head_prediction,
+                                                              add_batch_to_negs=self.training)
             if self.training:
-                mlp_pos_scores, mlp_neg_scores = self.classify_triple(query_embeds, positive_target_embeds,
-                                                                      negative_target_embeds, r_query, is_head_prediction)
                 return (transe_pos_scores, transe_neg_scores), (mlp_pos_scores, mlp_neg_scores)
             else:
-                return transe_pos_scores, transe_neg_scores
+                return (mlp_pos_scores, mlp_neg_scores) if self.decoder == "MLP+TransE" \
+                    else (transe_pos_scores, transe_neg_scores)
         else:
             raise Exception(f"Decoder '{self.decoder}' not valid.")
 
@@ -300,7 +307,7 @@ class KGCompletionGNN(nn.Module):
         elif self.decoder == "TransE":
             self.margin = margin
             return self.margin_ranking_loss
-        elif self.decoder == "MLP+TransE":
+        elif self.decoder in ["MLP+TransE", "TransE+MLP"]:
             self.margin = margin
             return self.combo_loss
         else:
@@ -356,6 +363,24 @@ def query_target_to_head_tail(query_embeds: Tensor, pos_target_embeds: Tensor, n
     neg_tail_embeds = torch.where(is_head_prediction.reshape(-1, 1, 1), query_embeds, neg_target_embeds)
 
     return head_embeds, tail_embeds, neg_head_embeds, neg_tail_embeds
+
+
+class MLPClassificationLayer(nn.Module):
+    def __init__(self, embed_dim):
+        super(MLPClassificationLayer, self).__init__()
+        self.proj = nn.Linear(4 * embed_dim, 1)
+
+    def forward(self, query_embeds, pos_target_embeds, neg_target_embeds, is_head_prediction,
+                add_batch_to_negs=False):
+        head_embeds, tail_embeds, neg_head_embeds, neg_tail_embeds = query_target_to_head_tail(
+            query_embeds, pos_target_embeds, neg_target_embeds, is_head_prediction,
+            add_pos_to_negs=add_batch_to_negs)
+        pos = torch.cat([head_embeds, tail_embeds, head_embeds - tail_embeds, head_embeds * tail_embeds], dim=-1)
+        neg = torch.cat([neg_head_embeds, neg_tail_embeds, neg_head_embeds - neg_tail_embeds,
+                         neg_head_embeds * neg_tail_embeds], dim=-1)
+        pos_scores = self.proj(pos)
+        neg_scores = self.proj(neg)
+        return pos_scores, neg_scores
 
 
 class TransEDecoder(nn.Module):
