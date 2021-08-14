@@ -175,7 +175,7 @@ def train(global_rank, local_rank, world):
     for epoch in range(start_epoch, FLAGS.epochs):
         if global_rank == 0:
             print(f'Epoch {epoch}')
-        for i, (batch, queries, positive_targets, negative_targets) in enumerate(tqdm(train_loader)):
+        for i, (batch, queries, positive_targets, negative_targets, neg_filter) in enumerate(tqdm(train_loader)):
             ddp_model.train()
             batch = prepare_batch_for_model(batch, dataset)
             batch = move_batch_to_device(batch, local_rank)
@@ -186,7 +186,7 @@ def train(global_rank, local_rank, world):
                                                queries=queries, positive_targets=positive_targets,
                                                negative_targets=negative_targets)
 
-            loss = loss_fn(pos_scores, neg_scores)
+            loss = loss_fn(pos_scores, neg_scores, neg_filter=neg_filter)
 
             # max_token_length = max(input_ids.shape[1], max_token_length)
 

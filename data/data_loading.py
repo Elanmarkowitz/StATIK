@@ -171,6 +171,7 @@ class TrainingCollateFunction:
                                                              method=encoder_method)
         self.message_passing_loading_fn = MessagePassingLoadingFunction(dataset.graph, max_neighbors=max_neighbors)
         self.num_negatives = num_negatives
+        self.graph = dataset.graph
         self.num_relations = dataset.base_ds.num_relations
         self.training_entities = dataset.graph.present_entities
 
@@ -203,8 +204,10 @@ class TrainingCollateFunction:
 
         entity_feat = None
 
+        neg_filter = self._get_neg_filter_for_targets(batch, negatives)
+
         return (input_ids, token_type_ids, attention_mask, ht_tensor, r_tensor, r_query, entity_set, entity_feat, query_nodes, r_relatives, is_head_prediction), \
-            token_queries, positive_targets, negative_targets
+            token_queries, positive_targets, negative_targets, neg_filter
 
     def _get_negatives(self, num_negatives):
         return self.training_entities[np.random.randint(0, len(self.training_entities), (num_negatives,))]
@@ -221,20 +224,46 @@ class TrainingCollateFunction:
 
         return to_mp_loader
 
+    def _get_neg_filter_for_targets(self, batch, negatives):
+        queries = [[h,r] for h,r,t in batch] + [[t,r + self.num_relations] for h,r,t in batch]
+        targets = [t for h,r,t in batch] + [h for h,r,t in batch]
+
+        filter_negs = []
+
+        for head, relation in queries:
+            filter_negs_for_query = []
+            for target in negatives:
+                if np.logical_and(self.graph.edge_lccsr[head] == target, self.graph.relation_lccsr[head] == relation).any():
+                    filter_negs_for_query.append(False)
+                else:
+                    filter_negs_for_query.append(True)
+            for target in targets:
+                if np.logical_and(self.graph.edge_lccsr[head] == target, self.graph.relation_lccsr[head] == relation).any():
+                    filter_negs_for_query.append(False)
+                else:
+                    filter_negs_for_query.append(True)
+            filter_negs.append(filter_negs_for_query)
+        return np.array(filter_negs)
+
     @staticmethod
     def _prepare_for_tokenizer_fn(batch, negatives=None):
         to_tokenizer = []
 
+        QUERY = True
+        TARGET = False
+        TAIL_PRED = False
+        HEAD_PRED = True
+
         # Add queries
-        to_tokenizer += [(h, r, t, False, True) for h, r, t in batch]  # tail prediction
-        to_tokenizer += [(h, r, t, True, True) for h, r, t in batch]  # head prediction
+        to_tokenizer += [(h, r, t, TAIL_PRED, QUERY) for h, r, t in batch]  # tail prediction
+        to_tokenizer += [(h, r, t, HEAD_PRED, QUERY) for h, r, t in batch]  # head prediction
 
         # Add positive targets
-        to_tokenizer += [(h, r, t, False, False) for h, r, t in batch]  # tail prediction
-        to_tokenizer += [(h, r, t, True, False) for h, r, t in batch]  # head prediction
+        to_tokenizer += [(h, r, t, TAIL_PRED, TARGET) for h, r, t in batch]  # tail prediction
+        to_tokenizer += [(h, r, t, HEAD_PRED, TARGET) for h, r, t in batch]  # head prediction
 
         if negatives is not None:
-            to_tokenizer += [(-1, -1, n, False, False) for n in negatives]
+            to_tokenizer += [(-1, -1, n, TAIL_PRED, TARGET) for n in negatives]
 
         return to_tokenizer
 

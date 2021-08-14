@@ -156,7 +156,7 @@ def process_data(root_data_dir: str, dataset_name: str, transfer_setting=False) 
                                        [train_targets, valid_targets, test_targets]):
         if isinstance(dataset, ProcessWikidata5M) and stage == 'train':
             continue  # too large of a filter
-        edge_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, f'{stage}_rel_lccsr.npz'))
+        edge_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, f'{stage}_edge_lccsr.npz'))
         rel_lccsr = LeftContiguousCSR.load(os.path.join(save_dir, f'{stage}_rel_lccsr.npz'))
         h_filter_mask = get_filtered_candidate_with_lccsr(triples[:, [2, 1]], edge_lccsr, rel_lccsr,
                                                           dataset.num_entities, dataset.num_relations, head_pred=True)

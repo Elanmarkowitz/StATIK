@@ -132,9 +132,11 @@ class ProcessWordNet(object):
 
     @staticmethod
     def _simplify_text_data(data: pd.Series):
-        data = data.apply(lambda x: x.replace('\\\\n', ' '))
-        data = data.apply(lambda x: x.replace('\\\\t', ' '))
-        data = data.apply(lambda x: x.replace('\\\\', ''))
+        data = data.apply(lambda x: x.replace('\\n', ' '))
+        data = data.apply(lambda x: x.replace('\\t', ' '))
+        data = data.apply(lambda x: x.replace('\\"','"'))
+        data = data.apply(lambda x: x.replace("\\'","'"))
+        data = data.apply(lambda x: x.replace('\\', ''))
         data = data.apply(ProcessWordNet._remove_accented_chars)
         return data
 
