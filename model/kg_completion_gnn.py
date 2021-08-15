@@ -89,36 +89,6 @@ class MessagePassingLayer(nn.Module):
         return out
 
 
-class TripleClassificationLayer(nn.Module):
-    def __init__(self, embed_dim: int):
-        super(TripleClassificationLayer, self).__init__()
-        self.embed_dim = embed_dim
-        self.layer1 = nn.Linear(4 * embed_dim, embed_dim)
-        self.layer2 = nn.Linear(embed_dim, 1)
-        self.act = nn.LeakyReLU()
-
-    def forward(self, query_embeds: Tensor, pos_target_embeds: Tensor, neg_target_embeds: Tensor, r_type: Tensor,
-                is_head_prediction: Tensor, add_batch_to_negs=False):
-        """
-
-        :param query_embeds:
-        :param pos_target_embeds:
-        :param neg_target_embeds:
-        :param r_type:
-        :param is_head_prediction:
-        :return:
-        """
-        head_embeds, tail_embeds, neg_head_embeds, neg_tail_embeds = query_target_to_head_tail(
-            query_embeds, pos_target_embeds, neg_target_embeds, is_head_prediction,
-            add_pos_to_negs=self.training)
-        pos_examples = torch.cat([head_embeds, tail_embeds, head_embeds - tail_embeds, head_embeds * tail_embeds], dim=-1)
-        neg_examples = torch.cat([neg_head_embeds, neg_tail_embeds, neg_head_embeds - neg_tail_embeds, neg_head_embeds * neg_tail_embeds], dim=-1)
-
-        pos_out = self.layer2(self.act(self.layer1(pos_examples)))
-        neg_out = self.layer2(self.act(self.layer1(neg_examples)))
-        return pos_out, neg_out
-
-
 class EdgeUpdateLayer(nn.Module):
     def __init__(self, embed_dim: int):
         super(EdgeUpdateLayer, self).__init__()
