@@ -6,6 +6,7 @@ from torch import nn
 from torch import Tensor
 from transformers import AutoModel
 import torch_scatter
+from timeit import default_timer as timer
 
 ENCODERS = ['ours_parallel', 'ours_sequential', 'BLP', 'StAR']
 
@@ -136,6 +137,7 @@ class KGCompletionGNN(nn.Module):
         self.softmax = nn.Softmax(dim=0)
 
         self.language_transformer = AutoModel.from_pretrained(self.language_model)
+        breakpoint()
 
         self.relation_embedding = nn.Embedding(num_relations, input_dim)
         if relation_feat is not None:
@@ -143,7 +145,6 @@ class KGCompletionGNN(nn.Module):
         if not config.train_through_relation_feat:
             self.relation_embedding.weight.requires_grad = False   # Comment to learn through message passing relation embedding table
         self.relative_direction_embedding = nn.Embedding(2, self.embed_dim)
-        self.head_or_tail_edge_embedding = nn.Embedding(2, self.embed_dim)
 
         self.edge_input_transform = nn.Linear(input_dim, self.embed_dim)
 
@@ -160,7 +161,6 @@ class KGCompletionGNN(nn.Module):
             self.message_passing_layers.append(MessagePassingLayer(self.embed_dim))
             self.edge_update_layers.append(EdgeUpdateLayer(self.embed_dim))
 
-        self.mlp_decoder = MLPClassificationLayer(self.embed_dim)
         self.transE_decoder = TransEDecoder(num_relations, self.embed_dim)
         self.language_layer_norm = nn.LayerNorm(self.embed_dim)
         self.mp_layer_norm = nn.LayerNorm(self.embed_dim)
@@ -196,47 +196,40 @@ class KGCompletionGNN(nn.Module):
         :return:
         """
         # Transform entities
+        start = timer()
         language_embedding = self.language_transformer(input_ids=input_ids, token_type_ids=token_type_ids,
                                                        attention_mask=attention_mask)[0][:, 0]
+        end = timer()
+        print(1000 * (end - start))
 
-        if self.encoder == "ours_sequential":
-            entity_feat[query_nodes] = language_embedding
+        start = timer()
+        H_0 = self.entity_input_transform2(self.dropout(entity_feat))
+        H_0 = self.norm_entity(H_0)
+        H = H_0
+        #
+        # Transform relations
+        r_embed = self.relation_embedding(r_tensor)
+        r_direction_embed = self.relative_direction_embedding(r_relative)
+        E_0 = self.act(self.edge_input_transform(r_embed))
+        E_0 = self.norm_edge(E_0)
+        E = E_0 + r_direction_embed
 
-        if self.encoder in ['ours_parallel', 'ours_sequential']:
+        for i in range(self.num_layers):
+            H = self.dropout(self.message_passing_layers[i](H, E, ht))
+            E = self.edge_update_layers[i](H, E, ht)
+        end = timer()
+        print(1000 * (end - start))
+        breakpoint()
 
-            H_0 = self.entity_input_transform2(self.dropout(entity_feat))
-            H_0 = self.norm_entity(H_0)
-            H = H_0
-            #
-            # Transform relations
-            r_embed = self.relation_embedding(r_tensor)
-            r_direction_embed = self.relative_direction_embedding(r_relative)
-            E_0 = self.act(self.edge_input_transform(r_embed))
-            E_0 = self.norm_edge(E_0)
-            E = E_0 + r_direction_embed
-
-            for i in range(self.num_layers):
-                H = self.dropout(self.message_passing_layers[i](H, E, ht))
-                E = self.edge_update_layers[i](H, E, ht)
 
         # final_embeddings = 0.5*H[query_nodes] + 0.5*H_0[query_nodes]  # TODO: look at pooling of message passing
-
-        if self.encoder == "ours_sequential":
-            final_embeddings = H[query_nodes]
-        elif self.encoder == "ours_parallel":
-            catted_embeds = torch.cat([H[query_nodes],
-                                      self.entity_input_transform(language_embedding)], dim=-1)
-            final_embeddings = self.encoder_combination_layer(self.act(catted_embeds))
-            # final_embeddings = self.mp_layer_norm(H[query_nodes]) + self.language_layer_norm(self.entity_input_transform(language_embedding))
-            # final_embeddings = F.normalize(H[query_nodes]) + F.normalize(self.entity_input_transform(language_embedding))
-            # final_embeddings = H[query_nodes] + self.entity_input_transform(language_embedding)
-        elif self.encoder == "BLP":
-            final_embeddings = self.entity_input_transform(language_embedding)
-        elif self.encoder == 'StAR':
-            final_embeddings = self.entity_input_transform(language_embedding)  # TODO: check that this is how they handle
-        else:
-            raise Exception(f'Unknown handling of {self.encoder}, check code for issue')
-
+        catted_embeds = torch.cat([H[query_nodes],
+                                    self.entity_input_transform(language_embedding)], dim=-1)
+        final_embeddings = self.encoder_combination_layer(self.act(catted_embeds))
+        # final_embeddings = self.mp_layer_norm(H[query_nodes]) + self.language_layer_norm(self.entity_input_transform(language_embedding))
+        # final_embeddings = F.normalize(H[query_nodes]) + F.normalize(self.entity_input_transform(language_embedding))
+        # final_embeddings = H[query_nodes] + self.entity_input_transform(language_embedding)
+        
         if self._encode_only:
             return final_embeddings
 
@@ -249,28 +242,10 @@ class KGCompletionGNN(nn.Module):
             positive_target_embeds = final_embeddings[torch.logical_not(queries)]
             negative_target_embeds = target_embeddings
 
-        if self.decoder == "TransE":
-            pos_scores, neg_scores = self.transE_decoder(query_embeds, positive_target_embeds, negative_target_embeds,
-                                                         r_query, is_head_prediction, add_batch_to_negs=self.training)
-            return pos_scores, neg_scores
-        elif self.decoder == "MLP":
-            pos_scores, neg_scores = self.mlp_decoder(query_embeds, positive_target_embeds, negative_target_embeds,
-                                                      is_head_prediction, add_batch_to_negs=self.training)
-            return pos_scores, neg_scores
-        elif self.decoder in ["MLP+TransE", "TransE+MLP"]:
-            transe_pos_scores, transe_neg_scores = self.transE_decoder(query_embeds, positive_target_embeds,
-                                                                       negative_target_embeds, r_query,
-                                                                       is_head_prediction, add_batch_to_negs=self.training)
-            mlp_pos_scores, mlp_neg_scores = self.mlp_decoder(query_embeds, positive_target_embeds,
-                                                              negative_target_embeds, is_head_prediction,
-                                                              add_batch_to_negs=self.training)
-            if self.training:
-                return (transe_pos_scores, transe_neg_scores), (mlp_pos_scores, mlp_neg_scores)
-            else:
-                return (mlp_pos_scores, mlp_neg_scores) if self.decoder == "MLP+TransE" \
-                    else (transe_pos_scores, transe_neg_scores)
-        else:
-            raise Exception(f"Decoder '{self.decoder}' not valid.")
+
+        pos_scores, neg_scores = self.transE_decoder(query_embeds, positive_target_embeds, negative_target_embeds,
+                                                        r_query, is_head_prediction, add_batch_to_negs=self.training)
+        return pos_scores, neg_scores
 
     def get_loss_fn(self, margin=1.0):
         if self.decoder == "MLP":
