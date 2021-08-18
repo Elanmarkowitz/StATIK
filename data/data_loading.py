@@ -7,6 +7,8 @@ from transformers import BertTokenizer
 from data.data_classes import KGGraph, KGLoadableDataset, KGInferenceDataset
 
 
+NUM_WORDS = int(os.environ['n_words']) if 'n_words' in os.environ else 32
+
 class MessagePassingLoadingFunction:
     def __init__(self, graph: KGGraph, max_neighbors=10):
         self.graph = graph
@@ -159,7 +161,7 @@ class TokenizerLoadingFunction:
         return text
 
     @staticmethod
-    def _get_n_words(text, n=32):
+    def _get_n_words(text, n=NUM_WORDS):
         return ' '.join(text.split(' ')[:n])
 
 

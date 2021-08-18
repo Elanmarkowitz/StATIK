@@ -29,6 +29,8 @@ DATASET_INFO = {
         'rel_desc': 'relation2text.txt'
     }
 
+NUM_WORDS = int(os.environ['n_words']) if 'n_words' in os.environ else 24
+
 class ProcessWordNet(object):
     def __init__(self, root_data_dir=None, dataset_info=None):
         # print('hello')
@@ -89,7 +91,7 @@ class ProcessWordNet(object):
         return desc
 
     @staticmethod
-    def get_first_n_words(desc, n=24):
+    def get_first_n_words(desc, n=NUM_WORDS):
         words = desc.split(' ')
         return ' '.join(words[:n])
 
