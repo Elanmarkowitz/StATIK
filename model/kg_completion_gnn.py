@@ -321,13 +321,16 @@ class KGCompletionGNN(nn.Module):
         elif self.decoder == "ComplEx":
             self.margin = margin
             return self.margin_ranking_loss
+        elif self.decoder == "DistMult":
+            self.margin = margin
+            return self.margin_ranking_loss
         elif self.decoder in ["MLP+TransE", "TransE+MLP"]:
             self.margin = margin
             return self.combo_loss
         else:
             Exception(f"Loss function not known for {self.decoder}")
 
-    def margin_ranking_loss(self, pos_scores, neg_scores):
+    def margin_ranking_loss(self, pos_scores, neg_filter):
         """
         :param pos_scores: (num_pos,)
         :param neg_scores: (num_pos, num_neg)
@@ -489,7 +492,7 @@ class ComplExDecoder(nn.Module):
 
 class DistMultDecoder(nn.Module):
     def __init__(self, num_relations: int, embed_dim: int, distance_norm: int = 1):
-        super(ComplExDecoder, self).__init__()
+        super(DistMultDecoder, self).__init__()
         self.distance_norm = distance_norm
         self.relation_vector = nn.Embedding(num_relations, embed_dim)
         nn.init.xavier_uniform_(self.relation_vector.weight.data)
