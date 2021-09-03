@@ -89,36 +89,6 @@ class MessagePassingLayer(nn.Module):
         return out
 
 
-class TripleClassificationLayer(nn.Module):
-    def __init__(self, embed_dim: int):
-        super(TripleClassificationLayer, self).__init__()
-        self.embed_dim = embed_dim
-        self.layer1 = nn.Linear(4 * embed_dim, embed_dim)
-        self.layer2 = nn.Linear(embed_dim, 1)
-        self.act = nn.LeakyReLU()
-
-    def forward(self, query_embeds: Tensor, pos_target_embeds: Tensor, neg_target_embeds: Tensor, r_type: Tensor,
-                is_head_prediction: Tensor, add_batch_to_negs=False):
-        """
-
-        :param query_embeds:
-        :param pos_target_embeds:
-        :param neg_target_embeds:
-        :param r_type:
-        :param is_head_prediction:
-        :return:
-        """
-        head_embeds, tail_embeds, neg_head_embeds, neg_tail_embeds = query_target_to_head_tail(
-            query_embeds, pos_target_embeds, neg_target_embeds, is_head_prediction,
-            add_pos_to_negs=self.training)
-        pos_examples = torch.cat([head_embeds, tail_embeds, head_embeds - tail_embeds, head_embeds * tail_embeds], dim=-1)
-        neg_examples = torch.cat([neg_head_embeds, neg_tail_embeds, neg_head_embeds - neg_tail_embeds, neg_head_embeds * neg_tail_embeds], dim=-1)
-
-        pos_out = self.layer2(self.act(self.layer1(pos_examples)))
-        neg_out = self.layer2(self.act(self.layer1(neg_examples)))
-        return pos_out, neg_out
-
-
 class EdgeUpdateLayer(nn.Module):
     def __init__(self, embed_dim: int):
         super(EdgeUpdateLayer, self).__init__()
@@ -196,9 +166,9 @@ class KGCompletionGNN(nn.Module):
         self.distmult_decoder = DistMultDecoder(num_relations, self.embed_dim)
         self.language_layer_norm = nn.LayerNorm(self.embed_dim)
         self.mp_layer_norm = nn.LayerNorm(self.embed_dim)
-        self.encoder_combination_layer = nn.Sequential(nn.Linear(2*self.embed_dim, self.embed_dim*10),
+        self.encoder_combination_layer = nn.Sequential(nn.Linear(2*self.embed_dim, self.embed_dim),
                                                        self.act,
-                                                       nn.Linear(self.embed_dim*10, self.embed_dim))
+                                                       nn.Linear(self.embed_dim, self.embed_dim))
         # self.conv_decoder = ConvolutionDecoder(embed_dim)
 
     def encode_only(self, val: bool):
@@ -207,7 +177,8 @@ class KGCompletionGNN(nn.Module):
 
     def forward(self, input_ids: Tensor, token_type_ids: Tensor, attention_mask: Tensor, ht: Tensor,
                 r_tensor: Tensor, r_query: Tensor, entity_feat: Tensor, query_nodes: Tensor, r_relative: Tensor,
-                is_head_prediction: Tensor, queries=None, negative_targets=None, positive_targets=None, target_embeddings=None):
+                is_head_prediction: Tensor, queries=None, negative_targets=None, positive_targets=None,
+                target_embeddings=None):
         """
         :param input_ids: For BERT
         :param token_type_ids: For BERT
@@ -255,13 +226,12 @@ class KGCompletionGNN(nn.Module):
         if self.encoder == "ours_sequential":
             final_embeddings = H[query_nodes]
         elif self.encoder == "ours_parallel":
-            # catted_embeds = torch.cat([H[query_nodes],
-            #                           self.entity_input_transform(language_embedding)], dim=-1)
-            # final_embeddings = self.encoder_combination_layer(self.act(catted_embeds))
+            catted_embeds = torch.cat([H[query_nodes],
+                                      self.entity_input_transform(language_embedding)], dim=-1)
+            final_embeddings = self.encoder_combination_layer(self.act(catted_embeds))
             # final_embeddings = self.mp_layer_norm(H[query_nodes]) + self.language_layer_norm(self.entity_input_transform(language_embedding))
             # final_embeddings = F.normalize(H[query_nodes]) + F.normalize(self.entity_input_transform(language_embedding))
             # final_embeddings = H[query_nodes] + self.entity_input_transform(language_embedding)
-            final_embeddings = self.norm_entity(H[query_nodes]) + self.norm_entity(self.entity_input_transform(language_embedding))
         elif self.encoder == "BLP":
             final_embeddings = self.entity_input_transform(language_embedding)
         elif self.encoder == 'StAR':
@@ -285,14 +255,6 @@ class KGCompletionGNN(nn.Module):
             pos_scores, neg_scores = self.transE_decoder(query_embeds, positive_target_embeds, negative_target_embeds,
                                                          r_query, is_head_prediction, add_batch_to_negs=self.training)
             return pos_scores, neg_scores
-        elif self.decoder == "ComplEx":
-            pos_scores, neg_scores = self.complex_decoder(query_embeds, positive_target_embeds, negative_target_embeds,
-                                                         r_query, is_head_prediction, add_batch_to_negs=self.training)
-        elif self.decoder == "DistMult":
-            pos_scores, neg_scores = self.distmult_decoder(query_embeds, positive_target_embeds, negative_target_embeds,
-                                                          r_query, is_head_prediction, add_batch_to_negs=self.training)
-
-            return pos_scores, neg_scores
         elif self.decoder == "MLP":
             pos_scores, neg_scores = self.mlp_decoder(query_embeds, positive_target_embeds, negative_target_embeds,
                                                       is_head_prediction, add_batch_to_negs=self.training)
@@ -314,14 +276,8 @@ class KGCompletionGNN(nn.Module):
 
     def get_loss_fn(self, margin=1.0):
         if self.decoder == "MLP":
-            return nn.BCEWithLogitsLoss()
+            return self.bce_with_logits
         elif self.decoder == "TransE":
-            self.margin = margin
-            return self.margin_ranking_loss
-        elif self.decoder == "ComplEx":
-            self.margin = margin
-            return self.margin_ranking_loss
-        elif self.decoder == "DistMult":
             self.margin = margin
             return self.margin_ranking_loss
         elif self.decoder in ["MLP+TransE", "TransE+MLP"]:
@@ -330,7 +286,7 @@ class KGCompletionGNN(nn.Module):
         else:
             Exception(f"Loss function not known for {self.decoder}")
 
-    def margin_ranking_loss(self, pos_scores, neg_filter):
+    def margin_ranking_loss(self, pos_scores, neg_scores, neg_filter=None):
         """
         :param pos_scores: (num_pos,)
         :param neg_scores: (num_pos, num_neg)
@@ -339,20 +295,26 @@ class KGCompletionGNN(nn.Module):
         pos_scores = pos_scores.reshape(-1, 1).expand(-1, neg_scores.shape[1])
 
         target = torch.tensor([1], dtype=torch.long, device=pos_scores.device)
+        if neg_filter is not None:
+            pos_scores = pos_scores.flatten()[neg_filter.flatten()]
+            neg_scores = neg_scores.flatten()[neg_filter.flatten()]
         return F.margin_ranking_loss(pos_scores, neg_scores, target, margin=self.margin)
 
     @staticmethod
-    def bce_with_logits(pos_scores, neg_scores):
+    def bce_with_logits(pos_scores, neg_scores, neg_filter=None):
+        if neg_filter is not None:
+            pos_scores = pos_scores.flatten()[neg_filter.flatten()]
+            neg_scores = neg_scores.flatten()[neg_filter.flatten()]
         pos_scores = pos_scores.flatten()
         neg_scores = neg_scores.flatten()
         labels = torch.cat([torch.ones_like(pos_scores), torch.zeros_like(neg_scores)])
         scores = torch.cat([pos_scores, neg_scores])
         return F.binary_cross_entropy_with_logits(scores, labels)
 
-    def combo_loss(self, transe_scores, mlp_scores):
-        bce_loss = self.bce_with_logits(mlp_scores[0], mlp_scores[1])
-        transe_loss = self.margin_ranking_loss(transe_scores[0], transe_scores[1])
-        return transe_loss + 0.4 * bce_loss
+    def combo_loss(self, transe_scores, mlp_scores, neg_filter=None):
+        bce_loss = self.bce_with_logits(mlp_scores[0], mlp_scores[1], neg_filter=neg_filter)
+        transe_loss = self.margin_ranking_loss(transe_scores[0], transe_scores[1], neg_filter=neg_filter)
+        return transe_loss + bce_loss
 
 
 def query_target_to_head_tail(query_embeds: Tensor, pos_target_embeds: Tensor, neg_target_embeds: Tensor,
@@ -367,9 +329,9 @@ def query_target_to_head_tail(query_embeds: Tensor, pos_target_embeds: Tensor, n
     neg_target_embeds = neg_target_embeds.reshape(1, -1, embed_dim).expand(num_q, -1, -1)  # num q x num negs x d
 
     if add_pos_to_negs:
-        NUM_NEGS = 16
+        NUM_NEGS = 0
         neg_targets_from_pos = pos_target_embeds.reshape(1, num_q, embed_dim).expand(num_q, -1, -1)
-        neg_targets_from_pos = neg_targets_from_pos[torch.logical_not(torch.eye(num_q))].reshape(num_q, num_q-1, embed_dim)
+        # neg_targets_from_pos = neg_targets_from_pos[torch.logical_not(torch.eye(num_q))].reshape(num_q, num_q-1, embed_dim)
         # random_select = torch.randint(0, num_q - 1, (num_q, NUM_NEGS))
         # neg_targets_from_pos = neg_targets_from_pos[torch.arange(num_q).reshape(-1, 1), random_select]
         neg_target_embeds = torch.cat([neg_target_embeds, neg_targets_from_pos], dim=1)  # num q x num neg + num q - 1 x d
