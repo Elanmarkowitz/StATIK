@@ -1,3 +1,7 @@
+# StATIK: Structure and Text for Inductive Knowledge Graph Completion
+
+[Paper here](StATIK_NAACL_camera_ready.pdf)
+
 # KGCompletionGNN
 
 To run on multiple GPUs on a single node:
