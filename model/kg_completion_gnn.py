@@ -317,6 +317,7 @@ class KGCompletionGNN(nn.Module):
 
     @staticmethod
     def bce_with_logits(pos_scores, neg_scores, neg_filter=None):
+        pos_scores = pos_scores.reshape(-1, 1).expand(-1, neg_scores.shape[1])
         if neg_filter is not None:
             pos_scores = pos_scores.flatten()[neg_filter.flatten()]
             neg_scores = neg_scores.flatten()[neg_filter.flatten()]

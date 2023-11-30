@@ -33,7 +33,7 @@ flags.DEFINE_string("dataset", "wikikg90m_kddcup2021", "Specifies dataset from [
 flags.DEFINE_string("root_data_dir", "/nas/home/elanmark/data", "Root data dir for installing the ogb dataset")
 
 flags.DEFINE_integer("num_workers", 0, "Number of workers for the dataloader.")
-flags.DEFINE_integer("local_rank", 0, "Local rank, used for torch distributed launch.")
+# flags.DEFINE_integer("local_rank", 0, "Local rank, used for torch distributed launch.")
 flags.DEFINE_integer("print_freq", 1024, "How frequently to print learning statistics in number of iterations")
 flags.DEFINE_string("device", "cuda", "Device to use (cuda/cpu).")
 flags.DEFINE_string("checkpoint", None, "Resume training from checkpoint file in checkpoints directory.")
@@ -496,6 +496,7 @@ def main(argv):
     ws = int(os.environ['WORLD_SIZE'])
     master_addr = os.environ['MASTER_ADDR']
     master_port = os.environ['MASTER_PORT']
+    local_rank = int(os.environ['LOCAL_RANK'])
     backend = dist.Backend.GLOO if FLAGS.validation_only or FLAGS.test_only else dist.Backend.NCCL
     dist.init_process_group(backend=backend,
                             init_method="tcp://{}:{}".format(master_addr, master_port), rank=grank, world_size=ws)
@@ -504,9 +505,9 @@ def main(argv):
     world = dist.group.WORLD
 
     if FLAGS.validation_only or FLAGS.test_only:
-        inference_only(grank, FLAGS.local_rank, world)
+        inference_only(grank, local_rank, world)
     else:
-        train(grank, FLAGS.local_rank, world)
+        train(grank, local_rank, world)
     dist.destroy_process_group()
 
 

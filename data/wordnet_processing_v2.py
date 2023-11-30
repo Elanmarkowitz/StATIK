@@ -48,6 +48,7 @@ class ProcessWordNet(object):
         self.relation2id = None
         self.entity_text = None
         self.relation_text = None
+        self.root_data_dir = root_data_dir
 
         self.dataset_info = DATASET_INFO if dataset_info is None else dataset_info
         if root_data_dir is None:
@@ -67,13 +68,12 @@ class ProcessWordNet(object):
             self.load_process_data()
 
 
-    @staticmethod
-    def download_data(url, dataset):
+    def download_data(self, url, dataset):
         with urllib.request.urlopen(url) as dl_file:
-            with open(os.path.join(ROOT_DIR,  dataset), 'wb') as out_file:
+            with open(os.path.join(self.root_data_dir,  dataset+".tar"), 'wb') as out_file:
                 out_file.write(dl_file.read())
-        tar = tarfile.open(os.path.join(ROOT_DIR, dataset), "r:gz")
-        tar.extractall(ROOT_DIR)
+        tar = tarfile.open(os.path.join(self.root_data_dir,  dataset+".tar"), "r:gz")
+        tar.extractall(self.root_data_dir)
         tar.close()
 
     def read_triples(self, filename) -> pd.DataFrame:
